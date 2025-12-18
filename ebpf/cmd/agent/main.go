@@ -8,8 +8,8 @@ import (
 	"net"             // IP 타입 변환
 	"os/signal"       // OS 시그널 수신
 	"syscall"         // 시그널 상수 제공
-	"unsafe"          // 엔디안 판별용 포인터 캐스팅
 
+	// 엔디안 판별용 포인터 캐스팅
 	ebpfobjs "ebpf-k8s-internal-traffic-metrics" // bpf2go가 생성한 오브젝트 래퍼
 
 	"github.com/cilium/ebpf/link"    // eBPF 프로그램을 커널의 특정 훅에 연결하고 연결을 관리하는 패키지
@@ -22,16 +22,6 @@ type event struct {
 }
 
 const eventSize = 4 // 이벤트 페이로드 크기
-
-// hostByteOrder는 런타임의 엔디안을 반환한다.
-func hostByteOrder() binary.ByteOrder {
-	var i uint16 = 1                    // 엔디안 판별용 값
-	b := (*[2]byte)(unsafe.Pointer(&i)) // 값의 바이트 뷰
-	if b[0] == 1 {                      // 첫 바이트가 1이면 리틀 엔디안
-		return binary.LittleEndian
-	}
-	return binary.BigEndian // 아니면 빅 엔디안
-}
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds) // 로그에 날짜+마이크로초 포함
@@ -68,8 +58,6 @@ func main() {
 		rd.Close()   // 리더 닫아 Read 해제
 	}()
 
-	byteOrder := hostByteOrder() // 런타임 엔디안 결정
-
 	for {
 		record, err := rd.Read() // 링버퍼에서 이벤트 읽기
 		if err != nil {          // 읽기 실패 처리
@@ -86,7 +74,7 @@ func main() {
 			continue                                                                                               // 다음 이벤트
 		}
 
-		addr := byteOrder.Uint32(record.RawSample[:eventSize]) // 엔디안에 맞춰 u32 추출
+		addr := binary.BigEndian.Uint32(record.RawSample[:eventSize]) // 커널에서 네트워크 오더로 저장된 u32를 읽음
 
 		ip := make(net.IP, net.IPv4len)      // IPv4 버퍼 생성
 		binary.BigEndian.PutUint32(ip, addr) // 네트워크 오더로 IP 채우기
