@@ -82,9 +82,15 @@ func (m *Mapper) Run(ctx context.Context, opts Options, kubeconfigPath string) e
 		return err
 	}
 
+	// TTL보다 짧은 주기로 resync하여 살아있는 엔트리를 갱신
+	resyncPeriod := opts.TTL / 2
+	if resyncPeriod <= 0 {
+		resyncPeriod = defaultTTL / 2
+	}
+
 	factory := informers.NewSharedInformerFactoryWithOptions( // 인포머 팩토리 생성
 		clientset,                               // 대상 클라이언트셋
-		0,                                       // 리싱크 주기(0=디폴트)
+		resyncPeriod,                            // 리싱크 주기
 		informers.WithNamespace(opts.Namespace), // 네임스페이스 필터
 	)
 
