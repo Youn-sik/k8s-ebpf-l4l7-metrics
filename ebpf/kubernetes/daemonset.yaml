@@ -70,7 +70,7 @@ spec:
             - name: MAPPER_CAPACITY
               value: "2048"
             - name: METRICS_ADDR
-              value: ""
+              value: "0.0.0.0:9102"
           volumeMounts:
             - name: bpffs
               mountPath: /sys/fs/bpf

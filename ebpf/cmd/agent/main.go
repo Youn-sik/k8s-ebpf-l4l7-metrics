@@ -6,10 +6,10 @@ import (
 	"errors"          // 에러 비교 유틸
 	"log"             // 표준 로그 출력
 	"net"             // IP 타입 변환
+	"net/http"        // 메트릭 HTTP 서버
 	"os"              // 환경변수 읽기
 	"os/signal"       // OS 시그널 수신
 	"path/filepath"   // kubeconfig 경로 결합
-	"net/http"        // 메트릭 HTTP 서버
 	"strconv"         // 문자열 숫자 변환
 	"syscall"         // 시그널 상수 제공
 	"time"            // TTL 파싱
@@ -17,10 +17,10 @@ import (
 	// 엔디안 판별용 포인터 캐스팅
 	ebpfobjs "ebpf-k8s-internal-traffic-metrics" // bpf2go가 생성한 오브젝트 래퍼
 
-	"github.com/cilium/ebpf/link"    // eBPF 프로그램을 커널의 특정 훅에 연결하고 연결을 관리하는 패키지
-	"github.com/cilium/ebpf/ringbuf" // eBPF 프로그램이 커널에서 발생시킨 이벤트를 User Space 에서 비동기적으로 수신하는 통로
-	"github.com/cilium/ebpf/rlimit"  // eBPF 프로그램 로딩에 필요한 시스템 자원 제한을 자동으로 설정하는 유틸리티
-	"github.com/prometheus/client_golang/prometheus"      // 메트릭 등록
+	"github.com/cilium/ebpf/link"                             // eBPF 프로그램을 커널의 특정 훅에 연결하고 연결을 관리하는 패키지
+	"github.com/cilium/ebpf/ringbuf"                          // eBPF 프로그램이 커널에서 발생시킨 이벤트를 User Space 에서 비동기적으로 수신하는 통로
+	"github.com/cilium/ebpf/rlimit"                           // eBPF 프로그램 로딩에 필요한 시스템 자원 제한을 자동으로 설정하는 유틸리티
+	"github.com/prometheus/client_golang/prometheus"          // 메트릭 등록
 	"github.com/prometheus/client_golang/prometheus/promhttp" // /metrics 핸들러
 
 	"ebpf-k8s-internal-traffic-metrics/internal/k8smapper" // K8s 매핑
@@ -69,7 +69,7 @@ func main() {
 	// 메트릭 설정
 	metricsAddr := os.Getenv("METRICS_ADDR")
 	if metricsAddr == "" {
-		metricsAddr = "0.0.0.0:8080"
+		metricsAddr = "0.0.0.0:9102"
 	}
 	counter := prometheus.NewCounterVec(
 		prometheus.CounterOpts{
