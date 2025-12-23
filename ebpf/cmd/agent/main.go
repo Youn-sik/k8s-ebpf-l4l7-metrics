@@ -79,7 +79,7 @@ func main() {
 			Name: "internal_tcp_attempts_total",
 			Help: "Count of internal TCP connect attempts mapped to K8s Services/Pods",
 		},
-		[]string{"destination_namespace", "destination_service", "destination_pod"},
+		[]string{"destination_namespace", "destination_service", "destination_pod", "process_comm"},
 	)
 	if err := prometheus.Register(counter); err != nil {
 		// 이미 등록되어 있어도 계속 진행
@@ -192,7 +192,7 @@ func main() {
 				pod = "unknown"
 			}
 
-			counter.WithLabelValues(ns, svc, pod).Inc()
+			counter.WithLabelValues(ns, svc, pod, comm).Inc()
 			log.Printf("[COUNTED] tcp connect dest=%s ns=%s svc=%s pod=%s comm=%s", ip.String(), ns, svc, pod, comm)
 		} else {
 			log.Printf("[UNMAPPED] tcp connect dest=%s comm=%s", ip.String(), comm) // 매핑 실패 로그
