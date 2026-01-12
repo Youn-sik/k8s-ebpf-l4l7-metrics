@@ -51,7 +51,7 @@ spec:
       terminationGracePeriodSeconds: 10
       containers:
         - name: agent
-          image: registry.skuberplus.com/library/k8s-ebpf-l4l7-metrics:0.0.12
+          image: registry.skuberplus.com/library/k8s-ebpf-l4l7-metrics:0.0.13
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
