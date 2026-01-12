@@ -20,11 +20,14 @@ type L7ReceiverAcceptArgsT struct {
 	Addr   uint64
 }
 
-type L7ReceiverLocalAddrT struct {
-	_         structs.HostLayout
-	LocalAddr uint32
-	LocalPort uint16
-	Pad       uint16
+type L7ReceiverPendingSockInfoT struct {
+	_          structs.HostLayout
+	LocalAddr  uint32
+	LocalPort  uint16
+	Pad1       uint16
+	ClientAddr uint32
+	ClientPort uint16
+	Pad2       uint16
 }
 
 type L7ReceiverReadArgsT struct {
@@ -102,7 +105,7 @@ type L7ReceiverMapSpecs struct {
 	ActiveAcceptArgs *ebpf.MapSpec `ebpf:"active_accept_args"`
 	ActiveReadArgs   *ebpf.MapSpec `ebpf:"active_read_args"`
 	HttpEvents       *ebpf.MapSpec `ebpf:"http_events"`
-	PendingLocalAddr *ebpf.MapSpec `ebpf:"pending_local_addr"`
+	PendingSockInfo  *ebpf.MapSpec `ebpf:"pending_sock_info"`
 	SocketInfoMap    *ebpf.MapSpec `ebpf:"socket_info_map"`
 }
 
@@ -135,7 +138,7 @@ type L7ReceiverMaps struct {
 	ActiveAcceptArgs *ebpf.Map `ebpf:"active_accept_args"`
 	ActiveReadArgs   *ebpf.Map `ebpf:"active_read_args"`
 	HttpEvents       *ebpf.Map `ebpf:"http_events"`
-	PendingLocalAddr *ebpf.Map `ebpf:"pending_local_addr"`
+	PendingSockInfo  *ebpf.Map `ebpf:"pending_sock_info"`
 	SocketInfoMap    *ebpf.Map `ebpf:"socket_info_map"`
 }
 
@@ -144,7 +147,7 @@ func (m *L7ReceiverMaps) Close() error {
 		m.ActiveAcceptArgs,
 		m.ActiveReadArgs,
 		m.HttpEvents,
-		m.PendingLocalAddr,
+		m.PendingSockInfo,
 		m.SocketInfoMap,
 	)
 }

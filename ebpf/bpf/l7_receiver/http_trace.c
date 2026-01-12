@@ -53,15 +53,16 @@ struct {
     __uint(max_entries, HTTP_RINGBUF_SIZE);    // 버퍼 크기 (바이트 단위)
 } http_events SEC(".maps");
 
-// kretprobe에서 수집한 로컬 주소를 임시 저장하는 맵
+// kretprobe에서 수집한 소켓 주소를 임시 저장하는 맵
 // kretprobe/inet_csk_accept이 sys_exit_accept4보다 먼저 실행되므로
 // 여기에 저장 후 sys_exit_accept4에서 socket_info_map에 병합
+// 클라이언트 주소도 수집하여 accept4(fd, NULL, ...)인 경우에도 처리 가능
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, MAX_ACTIVE_ACCEPT);
-    __type(key, __u64);                        // 키: pid_tgid
-    __type(value, struct local_addr_t);        // 값: 로컬 주소/포트
-} pending_local_addr SEC(".maps");
+    __type(key, __u64);                            // 키: pid_tgid
+    __type(value, struct pending_sock_info_t);     // 값: 로컬 + 클라이언트 주소/포트
+} pending_sock_info SEC(".maps");
 
 // ============================================================================
 // Helper Functions (헬퍼 함수)
@@ -187,14 +188,14 @@ int sys_exit_accept4(struct trace_event_raw_sys_exit *ctx)
     // accept 실패 시 (fd < 0) 저장된 인자 삭제 후 종료
     if (fd < 0) {
         bpf_map_delete_elem(&active_accept_args, &pid_tgid);
-        bpf_map_delete_elem(&pending_local_addr, &pid_tgid);
+        bpf_map_delete_elem(&pending_sock_info, &pid_tgid);
         return 0;
     }
 
     // 저장된 accept 인자 조회
     struct accept_args_t *args = bpf_map_lookup_elem(&active_accept_args, &pid_tgid);
     if (!args) {
-        bpf_map_delete_elem(&pending_local_addr, &pid_tgid);
+        bpf_map_delete_elem(&pending_sock_info, &pid_tgid);
         return 0;  // 인자가 없으면 종료 (sys_enter를 놓친 경우)
     }
 
@@ -202,26 +203,27 @@ int sys_exit_accept4(struct trace_event_raw_sys_exit *ctx)
     struct socket_info_t info = {};
     info.accept_time = bpf_ktime_get_ns();  // 수락 시각 기록 (나노초)
 
-    // 클라이언트 주소가 있으면 읽기
-    if (args->addr) {
-        struct sockaddr_in client_addr = {};
-        // 유저 공간에서 클라이언트 주소 구조체 읽기
-        // args->addr은 __u64로 저장된 포인터 주소이므로 void*로 캐스팅
-        if (bpf_probe_read_user(&client_addr, sizeof(client_addr), (void *)args->addr) == 0) {
-            // IPv4 주소인 경우만 처리 (AF_INET = 2)
-            if (client_addr.sin_family == AF_INET) {
-                info.client_addr = client_addr.sin_addr.s_addr;  // 클라이언트 IP (네트워크 바이트 오더)
-                info.client_port = client_addr.sin_port;         // 클라이언트 포트 (네트워크 바이트 오더)
-            }
-        }
+    // kretprobe에서 수집한 소켓 정보 병합 (우선 사용)
+    // kretprobe는 struct sock에서 직접 읽으므로 가장 신뢰할 수 있음
+    struct pending_sock_info_t *pending = bpf_map_lookup_elem(&pending_sock_info, &pid_tgid);
+    if (pending) {
+        info.local_addr = pending->local_addr;    // 로컬 IP
+        info.local_port = pending->local_port;    // 로컬 포트
+        info.client_addr = pending->client_addr;  // 클라이언트 IP
+        info.client_port = pending->client_port;  // 클라이언트 포트
+        bpf_map_delete_elem(&pending_sock_info, &pid_tgid);
     }
 
-    // kretprobe에서 수집한 로컬 주소 병합
-    struct local_addr_t *local = bpf_map_lookup_elem(&pending_local_addr, &pid_tgid);
-    if (local) {
-        info.local_addr = local->local_addr;  // 로컬 IP (network byte order)
-        info.local_port = local->local_port;  // 로컬 포트 (host byte order)
-        bpf_map_delete_elem(&pending_local_addr, &pid_tgid);
+    // kretprobe에서 클라이언트 정보를 못 얻은 경우, 유저 공간에서 읽기 시도
+    // accept4(fd, addr, addrlen, flags)에서 addr이 NULL이 아닌 경우
+    if (info.client_addr == 0 && args->addr) {
+        struct sockaddr_in client_addr = {};
+        if (bpf_probe_read_user(&client_addr, sizeof(client_addr), (void *)args->addr) == 0) {
+            if (client_addr.sin_family == AF_INET) {
+                info.client_addr = client_addr.sin_addr.s_addr;
+                info.client_port = client_addr.sin_port;
+            }
+        }
     }
 
     // 키 생성: 상위 32비트 = PID, 하위 32비트 = FD
@@ -251,19 +253,26 @@ int BPF_KRETPROBE(kretprobe_inet_csk_accept, struct sock *sk)
 
     __u64 pid_tgid = bpf_get_current_pid_tgid();
 
-    // struct sock에서 로컬 주소 정보 읽기 (CO-RE 사용)
-    // sk->__sk_common.skc_rcv_saddr: 로컬 IP (network byte order)
-    // sk->__sk_common.skc_num: 로컬 포트 (host byte order)
+    // struct sock에서 주소 정보 읽기 (CO-RE 사용)
+    // accept된 소켓에서:
+    // - skc_rcv_saddr: 로컬(서버) IP - 서버가 0.0.0.0으로 바인딩하면 0일 수 있음
+    // - skc_daddr: 원격(클라이언트) IP (network byte order)
+    // - skc_num: 로컬 포트 (host byte order)
+    // - skc_dport: 원격 포트 (network byte order)
     __u32 local_addr = BPF_CORE_READ(sk, __sk_common.skc_rcv_saddr);
     __u16 local_port = BPF_CORE_READ(sk, __sk_common.skc_num);
+    __u32 client_addr = BPF_CORE_READ(sk, __sk_common.skc_daddr);
+    __u16 client_port = BPF_CORE_READ(sk, __sk_common.skc_dport);
 
-    // pending_local_addr 맵에 임시 저장
+    // pending_sock_info 맵에 임시 저장
     // sys_exit_accept4에서 이 값을 가져와 socket_info_map에 병합
-    struct local_addr_t local_info = {};
-    local_info.local_addr = local_addr;
-    local_info.local_port = local_port;
+    struct pending_sock_info_t pending = {};
+    pending.local_addr = local_addr;
+    pending.local_port = local_port;
+    pending.client_addr = client_addr;
+    pending.client_port = client_port;
 
-    bpf_map_update_elem(&pending_local_addr, &pid_tgid, &local_info, BPF_ANY);
+    bpf_map_update_elem(&pending_sock_info, &pid_tgid, &pending, BPF_ANY);
 
     return 0;
 }

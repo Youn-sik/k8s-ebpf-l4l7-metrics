@@ -35,12 +35,16 @@ struct read_args_t {
     __u64 buf;               // char* 버퍼 주소를 __u64로 저장
 };
 
-// kretprobe에서 수집한 로컬 주소 임시 저장용
+// kretprobe에서 수집한 소켓 주소 임시 저장용
 // pid_tgid를 키로 사용, sys_exit_accept4에서 병합
-struct local_addr_t {
-    __u32 local_addr;        // Local IP (network byte order)
-    __u16 local_port;        // Local Port (host byte order)
-    __u16 _pad;              // Padding
+// inet_csk_accept의 struct sock에서 로컬/클라이언트 주소를 모두 수집
+struct pending_sock_info_t {
+    __u32 local_addr;        // Local IP (network byte order) - skc_rcv_saddr
+    __u16 local_port;        // Local Port (host byte order) - skc_num
+    __u16 _pad1;             // Padding
+    __u32 client_addr;       // Client IP (network byte order) - skc_daddr
+    __u16 client_port;       // Client Port (network byte order) - skc_dport
+    __u16 _pad2;             // Padding
 };
 
 // 소켓 정보 (accept에서 추출한 클라이언트 및 로컬 정보)

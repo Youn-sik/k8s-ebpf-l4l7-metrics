@@ -115,6 +115,7 @@ func (f *L7ProcessFilter) ExcludeCommsList() []string {
 
 // 기본 헬스체크 경로 패턴
 // 쿠버네티스 및 일반적인 서비스에서 사용하는 헬스체크 엔드포인트
+// 모니터링 스크래핑 경로도 포함 (실제 서비스 트래픽이 아님)
 var defaultHealthCheckPatterns = []string{
 	"/healthz", // 쿠버네티스 표준 헬스체크
 	"/readyz",  // 쿠버네티스 readiness 프로브
@@ -125,6 +126,7 @@ var defaultHealthCheckPatterns = []string{
 	"/ping",    // 핑 체크
 	"/status",  // 상태 확인
 	"/_health", // 언더스코어 프리픽스 헬스체크
+	"/metrics", // Prometheus 메트릭 스크래핑 경로
 }
 
 // NewHealthCheckFilter는 새로운 헬스체크 필터를 생성함
@@ -295,27 +297,39 @@ func (h *L7Handler) processRecord(record ringbuf.Record) {
 		comm,           // 요청을 처리한 프로세스
 	).Inc() // 카운터 1 증가
 
-	log.Printf("[L7][COUNTED] src=%s ns=%s svc=%s pod=%s method=%s path=%s comm=%s",
-		srcIP, ns, svc, pod, method, path, comm)
+	dstIP := uint32ToIP(event.Daddr)
+	log.Printf("[L7][COUNTED] src=%s dst=%s ns=%s svc=%s pod=%s method=%s path=%s comm=%s",
+		srcIP, dstIP, ns, svc, pod, method, path, comm)
 }
 
 // parseEvent는 원시 바이트를 HTTPEvent 구조체로 파싱함
 // 바이트 오프셋을 기반으로 각 필드를 추출
-// 링버퍼는 구조체를 그대로 메모리 복사하므로 host byte order (리틀 엔디안)로 읽음
-// IP/포트 값 자체는 network byte order이지만, 구조체 필드로 저장 시 리틀 엔디안
+//
+// IP 주소 바이트 오더 처리:
+// - eBPF에서 IP 주소는 network byte order (빅 엔디안)로 저장됨
+// - 링버퍼를 통해 전송된 raw 바이트를 그대로 BigEndian으로 읽음
+// - 이렇게 하면 uint32ToIP에서 추가 변환 없이 바로 사용 가능
+//
+// 기타 필드 바이트 오더:
+// - 포트: 소스 포트는 network byte order, 로컬 포트는 host byte order (혼재)
+// - PID: host byte order (리틀 엔디안)
+// - 문자열 필드: 바이트 순서 무관
 func (h *L7Handler) parseEvent(raw []byte) HTTPEvent {
 	var event HTTPEvent
 
-	// 모든 필드를 리틀 엔디안 (host byte order)으로 읽음
-	// 필드 값 자체가 network byte order인 경우 uint32ToIP에서 처리
-	event.Saddr = binary.LittleEndian.Uint32(raw[0:4])   // 오프셋 0-3: 소스 IP
-	event.Daddr = binary.LittleEndian.Uint32(raw[4:8])   // 오프셋 4-7: 목적지 IP
+	// IP 주소: network byte order (빅 엔디안)로 저장되어 있으므로 BigEndian으로 읽음
+	event.Saddr = binary.BigEndian.Uint32(raw[0:4]) // 오프셋 0-3: 소스 IP (network byte order)
+	event.Daddr = binary.BigEndian.Uint32(raw[4:8]) // 오프셋 4-7: 목적지 IP (network byte order)
+
+	// 포트 및 PID: host byte order (리틀 엔디안)
 	event.Sport = binary.LittleEndian.Uint16(raw[8:10])  // 오프셋 8-9: 소스 포트
 	event.Dport = binary.LittleEndian.Uint16(raw[10:12]) // 오프셋 10-11: 목적지 포트
 	event.Pid = binary.LittleEndian.Uint32(raw[12:16])   // 오프셋 12-15: PID
-	copy(event.Comm[:], raw[16:32])                      // 오프셋 16-31: 프로세스 이름 (16바이트)
-	copy(event.Method[:], raw[32:40])                    // 오프셋 32-39: HTTP 메서드 (8바이트)
-	copy(event.Path[:], raw[40:104])                     // 오프셋 40-103: 요청 경로 (64바이트)
+
+	// 문자열 필드: 바이트 복사
+	copy(event.Comm[:], raw[16:32])   // 오프셋 16-31: 프로세스 이름 (16바이트)
+	copy(event.Method[:], raw[32:40]) // 오프셋 32-39: HTTP 메서드 (8바이트)
+	copy(event.Path[:], raw[40:104])  // 오프셋 40-103: 요청 경로 (64바이트)
 
 	return event
 }
@@ -336,11 +350,11 @@ func bytesToString(b []byte) string {
 	return string(b) // 널 문자 없으면 전체 반환
 }
 
-// uint32ToIP는 uint32 (network byte order 값)를 net.IP로 변환함
-// eBPF에서 저장한 IP는 network byte order (빅 엔디안)
-// 링버퍼 전송 후 리틀 엔디안으로 읽었으므로, 빅 엔디안으로 다시 써서 복원
+// uint32ToIP는 uint32 값을 net.IP로 변환함
+// parseEvent에서 이미 BigEndian으로 읽었으므로 올바른 바이트 순서를 유지함
+// 예: 127.0.0.1 → 0x7F000001 → [127, 0, 0, 1]
 func uint32ToIP(addr uint32) net.IP {
-	ip := make(net.IP, net.IPv4len) // 4바이트 IPv4 주소
-	binary.BigEndian.PutUint32(ip, addr)
+	ip := make(net.IP, net.IPv4len)  // 4바이트 IPv4 주소
+	binary.BigEndian.PutUint32(ip, addr) // BigEndian으로 쓰면 올바른 IP 형식
 	return ip
 }
