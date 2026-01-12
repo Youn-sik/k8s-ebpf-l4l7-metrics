@@ -226,7 +226,8 @@ func main() {
 		}
 
 		healthFilter := NewHealthCheckFilter(cfg.FilterHealthCheck, cfg.HealthCheckPaths)
-		l7Handler := NewL7Handler(l7Reader, mapper, l7Counter, healthFilter)
+		processFilter := NewL7ProcessFilter(cfg.L7ExcludeComms)
+		l7Handler := NewL7Handler(l7Reader, mapper, l7Counter, healthFilter, processFilter)
 
 		go func() {
 			<-ctx.Done()
@@ -261,9 +262,10 @@ type Config struct {
 	MapperOpts        k8smapper.Options
 	EnableL4          bool
 	EnableL7          bool
-	ExcludeComms      string
-	FilterHealthCheck bool
-	HealthCheckPaths  string
+	ExcludeComms      string            // L4 제외 프로세스 (콤마 구분)
+	FilterHealthCheck bool              // L7 헬스체크 필터 활성화
+	HealthCheckPaths  string            // L7 추가 헬스체크 경로 (콤마 구분)
+	L7ExcludeComms    string            // L7 제외 프로세스 (콤마 구분)
 }
 
 func loadConfig() Config {
@@ -275,6 +277,7 @@ func loadConfig() Config {
 		ExcludeComms:      os.Getenv("EXCLUDE_COMMS"),
 		FilterHealthCheck: getEnvBool("FILTER_HEALTHCHECK", true),
 		HealthCheckPaths:  os.Getenv("HEALTHCHECK_PATHS"),
+		L7ExcludeComms:    os.Getenv("L7_EXCLUDE_COMMS"),
 	}
 
 	// Mapper options

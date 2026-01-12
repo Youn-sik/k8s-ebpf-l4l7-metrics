@@ -73,6 +73,10 @@ spec:
               value: "true"
             - name: FILTER_HEALTHCHECK
               value: "true"
+            # L7 프로세스 필터 (기본: node_exporter, victoria-metric, prometheus 등)
+            # 추가 제외가 필요하면 콤마로 구분하여 지정
+            - name: L7_EXCLUDE_COMMS
+              value: "node_exporter,victoria-metric,vmagent,prometheus"
           volumeMounts:
             - name: bpffs
               mountPath: /sys/fs/bpf

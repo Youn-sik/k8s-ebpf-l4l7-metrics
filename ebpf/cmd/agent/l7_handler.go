@@ -34,10 +34,11 @@ const httpEventSize = 104
 
 // L7Handler는 L7 HTTP 요청 이벤트를 처리하는 핸들러
 type L7Handler struct {
-	reader  *ringbuf.Reader        // eBPF 링 버퍼 리더
-	mapper  *k8smapper.Mapper      // K8s IP → 메타데이터 매퍼
-	counter *prometheus.CounterVec // Prometheus 카운터 메트릭
-	filter  *HealthCheckFilter     // 헬스체크 필터
+	reader        *ringbuf.Reader        // eBPF 링 버퍼 리더
+	mapper        *k8smapper.Mapper      // K8s IP → 메타데이터 매퍼
+	counter       *prometheus.CounterVec // Prometheus 카운터 메트릭
+	healthFilter  *HealthCheckFilter     // 헬스체크 필터
+	processFilter *L7ProcessFilter       // 프로세스 필터
 }
 
 // HealthCheckFilter는 헬스체크 요청을 필터링하는 구조체
@@ -45,6 +46,71 @@ type L7Handler struct {
 type HealthCheckFilter struct {
 	patterns []string // 필터링할 경로 패턴 목록
 	enabled  bool     // 필터 활성화 여부
+}
+
+// L7ProcessFilter는 L7 이벤트를 프로세스 이름으로 필터링하는 구조체
+// 모니터링 에이전트(node_exporter, victoria-metrics 등)의 요청을 제외시킴
+type L7ProcessFilter struct {
+	excludeComms map[string]struct{} // 제외할 프로세스 이름 (프리픽스 매칭)
+}
+
+// 기본 제외 프로세스 목록
+// 모니터링 에이전트들로 실제 서비스 트래픽이 아닌 메트릭 스크래핑 트래픽
+var defaultExcludeComms = []string{
+	"node_exporter",    // Prometheus node exporter
+	"victoria-metric",  // VictoriaMetrics (vmagent, vmselect 등)
+	"vmagent",          // VictoriaMetrics agent
+	"vmselect",         // VictoriaMetrics select
+	"vminsert",         // VictoriaMetrics insert
+	"prometheus",       // Prometheus server
+	"grafana",          // Grafana dashboard
+	"alertmanager",     // Prometheus alertmanager
+}
+
+// NewL7ProcessFilter는 새로운 L7 프로세스 필터를 생성함
+// customExcludeComms: 콤마로 구분된 추가 제외 프로세스 목록
+func NewL7ProcessFilter(customExcludeComms string) *L7ProcessFilter {
+	f := &L7ProcessFilter{
+		excludeComms: make(map[string]struct{}),
+	}
+
+	// 기본 제외 목록 추가
+	for _, comm := range defaultExcludeComms {
+		f.excludeComms[strings.ToLower(comm)] = struct{}{}
+	}
+
+	// 커스텀 제외 목록 추가
+	for _, part := range strings.Split(customExcludeComms, ",") {
+		part = strings.TrimSpace(part) // 앞뒤 공백 제거
+		if part != "" {
+			f.excludeComms[strings.ToLower(part)] = struct{}{} // 소문자로 정규화
+		}
+	}
+
+	return f
+}
+
+// ShouldExclude는 주어진 프로세스가 제외 대상인지 확인함
+// 프리픽스 매칭 방식 사용 (예: "victoria-metric"은 "victoria-metrics-xxx"도 매칭)
+// 반환값: (제외 여부, 매칭된 프리픽스)
+func (f *L7ProcessFilter) ShouldExclude(comm string) (bool, string) {
+	commLower := strings.ToLower(comm) // 대소문자 무시
+	for prefix := range f.excludeComms {
+		if strings.HasPrefix(commLower, prefix) {
+			return true, prefix // 제외 대상
+		}
+	}
+	return false, "" // 제외 대상 아님
+}
+
+// ExcludeCommsList는 제외 프로세스 프리픽스 목록을 반환함
+// 로깅 및 디버깅 용도
+func (f *L7ProcessFilter) ExcludeCommsList() []string {
+	list := make([]string, 0, len(f.excludeComms))
+	for k := range f.excludeComms {
+		list = append(list, k)
+	}
+	return list
 }
 
 // 기본 헬스체크 경로 패턴
@@ -114,13 +180,15 @@ func (f *HealthCheckFilter) Patterns() []string {
 // reader: eBPF 링 버퍼에서 이벤트를 읽는 리더
 // mapper: IP 주소를 K8s 메타데이터로 변환하는 매퍼
 // counter: Prometheus 메트릭 카운터
-// filter: 헬스체크 필터
-func NewL7Handler(reader *ringbuf.Reader, mapper *k8smapper.Mapper, counter *prometheus.CounterVec, filter *HealthCheckFilter) *L7Handler {
+// healthFilter: 헬스체크 필터
+// processFilter: 프로세스 필터
+func NewL7Handler(reader *ringbuf.Reader, mapper *k8smapper.Mapper, counter *prometheus.CounterVec, healthFilter *HealthCheckFilter, processFilter *L7ProcessFilter) *L7Handler {
 	return &L7Handler{
-		reader:  reader,
-		mapper:  mapper,
-		counter: counter,
-		filter:  filter,
+		reader:        reader,
+		mapper:        mapper,
+		counter:       counter,
+		healthFilter:  healthFilter,
+		processFilter: processFilter,
 	}
 }
 
@@ -129,12 +197,15 @@ func NewL7Handler(reader *ringbuf.Reader, mapper *k8smapper.Mapper, counter *pro
 func (h *L7Handler) Run(ctx context.Context) error {
 	log.Println("[L7] Handler started; waiting for HTTP request events")
 
-	// 필터 설정 로깅
-	if h.filter.enabled {
-		log.Printf("[L7] Health check filter enabled, patterns=%v", h.filter.Patterns())
+	// 헬스체크 필터 설정 로깅
+	if h.healthFilter.enabled {
+		log.Printf("[L7] Health check filter enabled, patterns=%v", h.healthFilter.Patterns())
 	} else {
 		log.Println("[L7] Health check filter disabled")
 	}
+
+	// 프로세스 필터 설정 로깅
+	log.Printf("[L7] Process filter excludeComms=%v (count=%d)", h.processFilter.ExcludeCommsList(), len(h.processFilter.excludeComms))
 
 	// 메인 이벤트 처리 루프
 	for {
@@ -185,9 +256,15 @@ func (h *L7Handler) processRecord(record ringbuf.Record) {
 	srcIP := uint32ToIP(event.Saddr) // 클라이언트 IP
 	// dstIP := uint32ToIP(event.Daddr) // 현재 사용 안함
 
+	// 프로세스 필터 적용 (모니터링 에이전트 제외)
+	if excluded, matchedPrefix := h.processFilter.ShouldExclude(comm); excluded {
+		log.Printf("[L7][FILTERED] src=%s method=%s path=%s comm=%s matched=%s (process excluded)", srcIP, method, path, comm, matchedPrefix)
+		return // 모니터링 프로세스는 메트릭에 포함하지 않음
+	}
+
 	// 헬스체크 필터 적용 (메트릭에서 완전히 제외)
-	if h.filter.IsHealthCheck(path) {
-		log.Printf("[L7][FILTERED] src=%s method=%s path=%s comm=%s (excluded)", srcIP, method, path, comm)
+	if h.healthFilter.IsHealthCheck(path) {
+		log.Printf("[L7][FILTERED] src=%s method=%s path=%s comm=%s (healthcheck excluded)", srcIP, method, path, comm)
 		return // 헬스체크는 메트릭에 포함하지 않음
 	}
 
