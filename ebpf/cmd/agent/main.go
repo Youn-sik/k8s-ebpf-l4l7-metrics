@@ -190,6 +190,15 @@ func main() {
 		}
 		defer tpAcceptExit.Close()
 
+		// Attach kretprobe for inet_csk_accept (local address collection)
+		// inet_csk_accept은 TCP accept의 핵심 커널 함수로, struct sock*를 반환
+		// 여기서 로컬(서버) 주소와 포트를 수집
+		kretAccept, err := link.Kretprobe("inet_csk_accept", l7Objs.KretprobeInetCskAccept, nil)
+		if err != nil {
+			log.Fatalf("[L7] failed to attach kretprobe/inet_csk_accept: %v", err)
+		}
+		defer kretAccept.Close()
+
 		// Attach tracepoints for read syscall (HTTP request capture)
 		tpReadEnter, err := link.Tracepoint("syscalls", "sys_enter_read", l7Objs.SysEnterRead, nil)
 		if err != nil {

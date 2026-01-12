@@ -53,6 +53,16 @@ struct {
     __uint(max_entries, HTTP_RINGBUF_SIZE);    // 버퍼 크기 (바이트 단위)
 } http_events SEC(".maps");
 
+// kretprobe에서 수집한 로컬 주소를 임시 저장하는 맵
+// kretprobe/inet_csk_accept이 sys_exit_accept4보다 먼저 실행되므로
+// 여기에 저장 후 sys_exit_accept4에서 socket_info_map에 병합
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, MAX_ACTIVE_ACCEPT);
+    __type(key, __u64);                        // 키: pid_tgid
+    __type(value, struct local_addr_t);        // 값: 로컬 주소/포트
+} pending_local_addr SEC(".maps");
+
 // ============================================================================
 // Helper Functions (헬퍼 함수)
 // ============================================================================
@@ -167,6 +177,7 @@ int sys_enter_accept4(struct trace_event_raw_sys_enter *ctx)
 
 // accept4 시스템 콜 종료점 트레이스포인트
 // 클라이언트 연결 수락 완료 시 호출됨
+// 클라이언트 주소 + kretprobe에서 수집한 로컬 주소를 병합
 SEC("tracepoint/syscalls/sys_exit_accept4")
 int sys_exit_accept4(struct trace_event_raw_sys_exit *ctx)
 {
@@ -176,12 +187,14 @@ int sys_exit_accept4(struct trace_event_raw_sys_exit *ctx)
     // accept 실패 시 (fd < 0) 저장된 인자 삭제 후 종료
     if (fd < 0) {
         bpf_map_delete_elem(&active_accept_args, &pid_tgid);
+        bpf_map_delete_elem(&pending_local_addr, &pid_tgid);
         return 0;
     }
 
     // 저장된 accept 인자 조회
     struct accept_args_t *args = bpf_map_lookup_elem(&active_accept_args, &pid_tgid);
     if (!args) {
+        bpf_map_delete_elem(&pending_local_addr, &pid_tgid);
         return 0;  // 인자가 없으면 종료 (sys_enter를 놓친 경우)
     }
 
@@ -203,6 +216,14 @@ int sys_exit_accept4(struct trace_event_raw_sys_exit *ctx)
         }
     }
 
+    // kretprobe에서 수집한 로컬 주소 병합
+    struct local_addr_t *local = bpf_map_lookup_elem(&pending_local_addr, &pid_tgid);
+    if (local) {
+        info.local_addr = local->local_addr;  // 로컬 IP (network byte order)
+        info.local_port = local->local_port;  // 로컬 포트 (host byte order)
+        bpf_map_delete_elem(&pending_local_addr, &pid_tgid);
+    }
+
     // 키 생성: 상위 32비트 = PID, 하위 32비트 = FD
     // 이렇게 하면 프로세스별로 FD를 구분할 수 있음
     __u64 sock_key = (pid_tgid & 0xFFFFFFFF00000000ULL) | (__u64)fd;
@@ -210,6 +231,40 @@ int sys_exit_accept4(struct trace_event_raw_sys_exit *ctx)
 
     // 사용 완료된 accept 인자 삭제
     bpf_map_delete_elem(&active_accept_args, &pid_tgid);
+    return 0;
+}
+
+// ============================================================================
+// Kretprobe: inet_csk_accept (로컬 주소 수집)
+// inet_csk_accept은 TCP accept의 핵심 커널 함수로, struct sock*를 반환
+// 여기서 로컬(서버) 주소와 포트를 안정적으로 수집할 수 있음
+// 실행 순서: sys_enter_accept4 → inet_csk_accept → kretprobe → sys_exit_accept4
+// ============================================================================
+
+SEC("kretprobe/inet_csk_accept")
+int BPF_KRETPROBE(kretprobe_inet_csk_accept, struct sock *sk)
+{
+    // 반환값이 NULL이면 accept 실패
+    if (!sk) {
+        return 0;
+    }
+
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+
+    // struct sock에서 로컬 주소 정보 읽기 (CO-RE 사용)
+    // sk->__sk_common.skc_rcv_saddr: 로컬 IP (network byte order)
+    // sk->__sk_common.skc_num: 로컬 포트 (host byte order)
+    __u32 local_addr = BPF_CORE_READ(sk, __sk_common.skc_rcv_saddr);
+    __u16 local_port = BPF_CORE_READ(sk, __sk_common.skc_num);
+
+    // pending_local_addr 맵에 임시 저장
+    // sys_exit_accept4에서 이 값을 가져와 socket_info_map에 병합
+    struct local_addr_t local_info = {};
+    local_info.local_addr = local_addr;
+    local_info.local_port = local_port;
+
+    bpf_map_update_elem(&pending_local_addr, &pid_tgid, &local_info, BPF_ANY);
+
     return 0;
 }
 
@@ -283,14 +338,15 @@ int sys_exit_read(struct trace_event_raw_sys_exit *ctx)
     if (sock) {
         e->saddr = sock->client_addr;  // 클라이언트(소스) IP
         e->sport = sock->client_port;  // 클라이언트(소스) 포트
+        e->daddr = sock->local_addr;   // 로컬(목적지) IP - kretprobe에서 수집
+        // local_port는 host byte order이므로 network byte order로 변환
+        e->dport = bpf_htons(sock->local_port);
     } else {
         e->saddr = 0;
         e->sport = 0;
+        e->daddr = 0;
+        e->dport = 0;
     }
-
-    // 로컬 주소/포트는 추가 조회 필요 (현재 미구현)
-    e->daddr = 0;
-    e->dport = 0;
 
     // 프로세스 정보 채우기
     e->pid = pid_tgid >> 32;  // 상위 32비트가 PID

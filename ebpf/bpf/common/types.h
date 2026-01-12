@@ -35,11 +35,22 @@ struct read_args_t {
     __u64 buf;               // char* 버퍼 주소를 __u64로 저장
 };
 
-// 소켓 정보 (accept에서 추출한 클라이언트 정보)
+// kretprobe에서 수집한 로컬 주소 임시 저장용
+// pid_tgid를 키로 사용, sys_exit_accept4에서 병합
+struct local_addr_t {
+    __u32 local_addr;        // Local IP (network byte order)
+    __u16 local_port;        // Local Port (host byte order)
+    __u16 _pad;              // Padding
+};
+
+// 소켓 정보 (accept에서 추출한 클라이언트 및 로컬 정보)
 struct socket_info_t {
     __u32 client_addr;    // Client IP (network byte order)
     __u16 client_port;    // Client Port (network byte order)
-    __u16 _pad;           // Padding for alignment
+    __u16 _pad1;          // Padding for alignment
+    __u32 local_addr;     // Local IP (network byte order) - 서버 주소
+    __u16 local_port;     // Local Port (host byte order) - 리스닝 포트
+    __u16 _pad2;          // Padding for alignment
     __u64 accept_time;    // Connection accept timestamp (ns)
 };
 

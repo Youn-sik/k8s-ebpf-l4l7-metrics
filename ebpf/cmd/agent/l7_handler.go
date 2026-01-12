@@ -224,10 +224,13 @@ func (h *L7Handler) processRecord(record ringbuf.Record) {
 
 // parseEvent는 원시 바이트를 HTTPEvent 구조체로 파싱함
 // 바이트 오프셋을 기반으로 각 필드를 추출
+// 링버퍼는 구조체를 그대로 메모리 복사하므로 host byte order (리틀 엔디안)로 읽음
+// IP/포트 값 자체는 network byte order이지만, 구조체 필드로 저장 시 리틀 엔디안
 func (h *L7Handler) parseEvent(raw []byte) HTTPEvent {
 	var event HTTPEvent
 
-	// 리틀 엔디안으로 필드 파싱 (x86 아키텍처 기준)
+	// 모든 필드를 리틀 엔디안 (host byte order)으로 읽음
+	// 필드 값 자체가 network byte order인 경우 uint32ToIP에서 처리
 	event.Saddr = binary.LittleEndian.Uint32(raw[0:4])   // 오프셋 0-3: 소스 IP
 	event.Daddr = binary.LittleEndian.Uint32(raw[4:8])   // 오프셋 4-7: 목적지 IP
 	event.Sport = binary.LittleEndian.Uint16(raw[8:10])  // 오프셋 8-9: 소스 포트
@@ -256,11 +259,11 @@ func bytesToString(b []byte) string {
 	return string(b) // 널 문자 없으면 전체 반환
 }
 
-// uint32ToIP는 uint32 (네트워크 바이트 오더)를 net.IP로 변환함
-// eBPF는 네트워크 바이트 오더(빅 엔디안)로 IP 주소를 저장
+// uint32ToIP는 uint32 (network byte order 값)를 net.IP로 변환함
+// eBPF에서 저장한 IP는 network byte order (빅 엔디안)
+// 링버퍼 전송 후 리틀 엔디안으로 읽었으므로, 빅 엔디안으로 다시 써서 복원
 func uint32ToIP(addr uint32) net.IP {
 	ip := make(net.IP, net.IPv4len) // 4바이트 IPv4 주소
-	// 빅 엔디안으로 변환 (네트워크 바이트 오더 유지)
 	binary.BigEndian.PutUint32(ip, addr)
 	return ip
 }

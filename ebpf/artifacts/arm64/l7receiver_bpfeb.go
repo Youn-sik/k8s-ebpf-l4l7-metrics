@@ -20,6 +20,13 @@ type L7ReceiverAcceptArgsT struct {
 	Addr   uint64
 }
 
+type L7ReceiverLocalAddrT struct {
+	_         structs.HostLayout
+	LocalAddr uint32
+	LocalPort uint16
+	Pad       uint16
+}
+
 type L7ReceiverReadArgsT struct {
 	_   structs.HostLayout
 	Fd  int32
@@ -31,7 +38,10 @@ type L7ReceiverSocketInfoT struct {
 	_          structs.HostLayout
 	ClientAddr uint32
 	ClientPort uint16
-	Pad        uint16
+	Pad1       uint16
+	LocalAddr  uint32
+	LocalPort  uint16
+	Pad2       uint16
 	AcceptTime uint64
 }
 
@@ -77,11 +87,12 @@ type L7ReceiverSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type L7ReceiverProgramSpecs struct {
-	SysEnterAccept4 *ebpf.ProgramSpec `ebpf:"sys_enter_accept4"`
-	SysEnterClose   *ebpf.ProgramSpec `ebpf:"sys_enter_close"`
-	SysEnterRead    *ebpf.ProgramSpec `ebpf:"sys_enter_read"`
-	SysExitAccept4  *ebpf.ProgramSpec `ebpf:"sys_exit_accept4"`
-	SysExitRead     *ebpf.ProgramSpec `ebpf:"sys_exit_read"`
+	KretprobeInetCskAccept *ebpf.ProgramSpec `ebpf:"kretprobe_inet_csk_accept"`
+	SysEnterAccept4        *ebpf.ProgramSpec `ebpf:"sys_enter_accept4"`
+	SysEnterClose          *ebpf.ProgramSpec `ebpf:"sys_enter_close"`
+	SysEnterRead           *ebpf.ProgramSpec `ebpf:"sys_enter_read"`
+	SysExitAccept4         *ebpf.ProgramSpec `ebpf:"sys_exit_accept4"`
+	SysExitRead            *ebpf.ProgramSpec `ebpf:"sys_exit_read"`
 }
 
 // L7ReceiverMapSpecs contains maps before they are loaded into the kernel.
@@ -91,6 +102,7 @@ type L7ReceiverMapSpecs struct {
 	ActiveAcceptArgs *ebpf.MapSpec `ebpf:"active_accept_args"`
 	ActiveReadArgs   *ebpf.MapSpec `ebpf:"active_read_args"`
 	HttpEvents       *ebpf.MapSpec `ebpf:"http_events"`
+	PendingLocalAddr *ebpf.MapSpec `ebpf:"pending_local_addr"`
 	SocketInfoMap    *ebpf.MapSpec `ebpf:"socket_info_map"`
 }
 
@@ -123,6 +135,7 @@ type L7ReceiverMaps struct {
 	ActiveAcceptArgs *ebpf.Map `ebpf:"active_accept_args"`
 	ActiveReadArgs   *ebpf.Map `ebpf:"active_read_args"`
 	HttpEvents       *ebpf.Map `ebpf:"http_events"`
+	PendingLocalAddr *ebpf.Map `ebpf:"pending_local_addr"`
 	SocketInfoMap    *ebpf.Map `ebpf:"socket_info_map"`
 }
 
@@ -131,6 +144,7 @@ func (m *L7ReceiverMaps) Close() error {
 		m.ActiveAcceptArgs,
 		m.ActiveReadArgs,
 		m.HttpEvents,
+		m.PendingLocalAddr,
 		m.SocketInfoMap,
 	)
 }
@@ -145,15 +159,17 @@ type L7ReceiverVariables struct {
 //
 // It can be passed to LoadL7ReceiverObjects or ebpf.CollectionSpec.LoadAndAssign.
 type L7ReceiverPrograms struct {
-	SysEnterAccept4 *ebpf.Program `ebpf:"sys_enter_accept4"`
-	SysEnterClose   *ebpf.Program `ebpf:"sys_enter_close"`
-	SysEnterRead    *ebpf.Program `ebpf:"sys_enter_read"`
-	SysExitAccept4  *ebpf.Program `ebpf:"sys_exit_accept4"`
-	SysExitRead     *ebpf.Program `ebpf:"sys_exit_read"`
+	KretprobeInetCskAccept *ebpf.Program `ebpf:"kretprobe_inet_csk_accept"`
+	SysEnterAccept4        *ebpf.Program `ebpf:"sys_enter_accept4"`
+	SysEnterClose          *ebpf.Program `ebpf:"sys_enter_close"`
+	SysEnterRead           *ebpf.Program `ebpf:"sys_enter_read"`
+	SysExitAccept4         *ebpf.Program `ebpf:"sys_exit_accept4"`
+	SysExitRead            *ebpf.Program `ebpf:"sys_exit_read"`
 }
 
 func (p *L7ReceiverPrograms) Close() error {
 	return _L7ReceiverClose(
+		p.KretprobeInetCskAccept,
 		p.SysEnterAccept4,
 		p.SysEnterClose,
 		p.SysEnterRead,
