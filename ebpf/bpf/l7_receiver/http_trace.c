@@ -91,7 +91,7 @@ static __always_inline bool is_http_request(const char *buf)
 // HTTP 요청에서 메서드, 경로, User-Agent를 파싱하는 함수
 // 경로는 MAX_PATH_DEPTH 레벨로 제한됨 (예: /api/users/* 형태로 잘림)
 // User-Agent는 헬스체크 필터링용으로 최대 31바이트까지 추출
-static __always_inline void parse_http_request(
+static __noinline void parse_http_request(
     const char *buf,        // HTTP 요청 버퍼 포인터
     __s64 len,              // 버퍼 길이
     char *method_out,       // 메서드 출력 버퍼
