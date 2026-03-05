@@ -16,22 +16,21 @@ import (
 )
 
 // HTTPEvent는 eBPF에서 전송된 L7 HTTP 요청 이벤트를 나타냄
-// bpf/common/types.h의 struct http_event와 동일한 레이아웃이어야 함
+// bpf/common/types.h의 struct http_event와 동일한 레이아웃
 type HTTPEvent struct {
-	Saddr     uint32   // 0-3: 소스 IP (클라이언트, 네트워크 바이트 오더)
-	Daddr     uint32   // 4-7: 목적지 IP (로컬, 네트워크 바이트 오더)
-	Sport     uint16   // 8-9: 소스 포트 (클라이언트)
-	Dport     uint16   // 10-11: 목적지 포트 (로컬)
-	Pid       uint32   // 12-15: 프로세스 ID
-	Comm      [16]byte // 16-31: 프로세스 이름 (최대 16바이트)
-	Method    [8]byte  // 32-39: HTTP 메서드 (GET, POST 등)
-	Path      [64]byte // 40-103: 요청 경로 (깊이 제한됨)
-	UserAgent [32]byte // 104-135: User-Agent 헤더 프리픽스 (헬스체크 필터링용)
+	Saddr      uint32    // 0-3: 소스 IP (클라이언트)
+	Daddr      uint32    // 4-7: 목적지 IP (로컬)
+	Sport      uint16    // 8-9: 소스 포트
+	Dport      uint16    // 10-11: 목적지 포트
+	Pid        uint32    // 12-15: 프로세스 ID
+	Comm       [16]byte  // 16-31: 프로세스 이름
+	PayloadLen uint32    // 32-35: 실제 읽은 데이터 길이
+	Payload    [256]byte // 36-291: Raw HTTP 데이터
+	Pad        uint32    // 292-295: 8바이트 정렬용 패딩
 }
 
 // HTTPEvent 구조체의 크기 (바이트 단위)
-// sizeof(HTTPEvent): 4+4+2+2+4+16+8+64+32 = 136 바이트
-const httpEventSize = 136
+const httpEventSize = 296
 
 // L7Handler는 L7 HTTP 요청 이벤트를 처리하는 핸들러
 type L7Handler struct {
@@ -43,7 +42,6 @@ type L7Handler struct {
 }
 
 // HealthCheckFilter는 헬스체크 요청을 필터링하는 구조체
-// 쿠버네티스의 liveness/readiness 프로브 등을 제외시킴
 type HealthCheckFilter struct {
 	patterns   []string // 필터링할 경로 패턴 목록
 	enabled    bool     // path 필터 활성화 여부
@@ -52,62 +50,47 @@ type HealthCheckFilter struct {
 }
 
 // L7ProcessFilter는 L7 이벤트를 프로세스 이름으로 필터링하는 구조체
-// 모니터링 에이전트(node_exporter, victoria-metrics 등)의 요청을 제외시킴
 type L7ProcessFilter struct {
-	excludeComms map[string]struct{} // 제외할 프로세스 이름 (프리픽스 매칭)
+	excludeComms map[string]struct{}
 }
 
-// 기본 제외 프로세스 목록
-// 모니터링 에이전트들로 실제 서비스 트래픽이 아닌 메트릭 스크래핑 트래픽
 var defaultExcludeComms = []string{
-	"node_exporter",    // Prometheus node exporter
-	"victoria-metric",  // VictoriaMetrics (vmagent, vmselect 등)
-	"vmagent",          // VictoriaMetrics agent
-	"vmselect",         // VictoriaMetrics select
-	"vminsert",         // VictoriaMetrics insert
-	"prometheus",       // Prometheus server
-	"grafana",          // Grafana dashboard
-	"alertmanager",     // Prometheus alertmanager
+	"node_exporter",
+	"victoria-metric",
+	"vmagent",
+	"vmselect",
+	"vminsert",
+	"prometheus",
+	"grafana",
+	"alertmanager",
 }
 
-// NewL7ProcessFilter는 새로운 L7 프로세스 필터를 생성함
-// customExcludeComms: 콤마로 구분된 추가 제외 프로세스 목록
 func NewL7ProcessFilter(customExcludeComms string) *L7ProcessFilter {
 	f := &L7ProcessFilter{
 		excludeComms: make(map[string]struct{}),
 	}
-
-	// 기본 제외 목록 추가
 	for _, comm := range defaultExcludeComms {
 		f.excludeComms[strings.ToLower(comm)] = struct{}{}
 	}
-
-	// 커스텀 제외 목록 추가
 	for _, part := range strings.Split(customExcludeComms, ",") {
-		part = strings.TrimSpace(part) // 앞뒤 공백 제거
+		part = strings.TrimSpace(part)
 		if part != "" {
-			f.excludeComms[strings.ToLower(part)] = struct{}{} // 소문자로 정규화
+			f.excludeComms[strings.ToLower(part)] = struct{}{}
 		}
 	}
-
 	return f
 }
 
-// ShouldExclude는 주어진 프로세스가 제외 대상인지 확인함
-// 프리픽스 매칭 방식 사용 (예: "victoria-metric"은 "victoria-metrics-xxx"도 매칭)
-// 반환값: (제외 여부, 매칭된 프리픽스)
 func (f *L7ProcessFilter) ShouldExclude(comm string) (bool, string) {
-	commLower := strings.ToLower(comm) // 대소문자 무시
+	commLower := strings.ToLower(comm)
 	for prefix := range f.excludeComms {
 		if strings.HasPrefix(commLower, prefix) {
-			return true, prefix // 제외 대상
+			return true, prefix
 		}
 	}
-	return false, "" // 제외 대상 아님
+	return false, ""
 }
 
-// ExcludeCommsList는 제외 프로세스 프리픽스 목록을 반환함
-// 로깅 및 디버깅 용도
 func (f *L7ProcessFilter) ExcludeCommsList() []string {
 	list := make([]string, 0, len(f.excludeComms))
 	for k := range f.excludeComms {
@@ -116,54 +99,28 @@ func (f *L7ProcessFilter) ExcludeCommsList() []string {
 	return list
 }
 
-// 기본 헬스체크 경로 패턴
-// 쿠버네티스 및 일반적인 서비스에서 사용하는 헬스체크 엔드포인트
-// 모니터링 스크래핑 경로도 포함 (실제 서비스 트래픽이 아님)
 var defaultHealthCheckPatterns = []string{
-	"/healthz", // 쿠버네티스 표준 헬스체크
-	"/readyz",  // 쿠버네티스 readiness 프로브
-	"/livez",   // 쿠버네티스 liveness 프로브
-	"/health",  // 일반적인 헬스체크
-	"/ready",   // readiness 체크
-	"/live",    // liveness 체크
-	"/ping",    // 핑 체크
-	"/status",  // 상태 확인
-	"/_health", // 언더스코어 프리픽스 헬스체크
-	"/metrics", // Prometheus 메트릭 스크래핑 경로
+	"/healthz", "/readyz", "/livez", "/health", "/ready", "/live", "/ping", "/status", "/_health", "/metrics",
 }
 
-// 기본 헬스체크 User-Agent 패턴
-// 소문자로 저장하여 대소문자 무시 매칭에 사용
 var defaultHealthCheckUAPatterns = []string{
-	"elb-healthchecker", // AWS ALB/NLB — "ELB-HealthChecker/2.0"
-	"kube-probe",        // Kubernetes kubelet — "kube-probe/1.28"
+	"elb-healthchecker", "kube-probe",
 }
 
-// NewHealthCheckFilter는 새로운 헬스체크 필터를 생성함
-// enabled: path 필터 활성화 여부
-// customPatterns: 콤마로 구분된 추가 경로 패턴 (예: "/api/health,/v1/status")
-// uaEnabled: UA 필터 활성화 여부
-// customUAPatterns: 콤마로 구분된 추가 UA 패턴 (예: "my-checker,custom-probe")
 func NewHealthCheckFilter(enabled bool, customPatterns string, uaEnabled bool, customUAPatterns string) *HealthCheckFilter {
-	// 기본 경로 패턴을 복사하여 시작
 	patterns := make([]string, len(defaultHealthCheckPatterns))
 	copy(patterns, defaultHealthCheckPatterns)
-
-	// 커스텀 경로 패턴 추가
 	if customPatterns != "" {
 		for _, p := range strings.Split(customPatterns, ",") {
-			p = strings.TrimSpace(p) // 공백 제거
+			p = strings.TrimSpace(p)
 			if p != "" {
-				patterns = append(patterns, strings.ToLower(p)) // 소문자로 정규화
+				patterns = append(patterns, strings.ToLower(p))
 			}
 		}
 	}
 
-	// 기본 UA 패턴을 복사하여 시작
 	uaPatterns := make([]string, len(defaultHealthCheckUAPatterns))
 	copy(uaPatterns, defaultHealthCheckUAPatterns)
-
-	// 커스텀 UA 패턴 추가
 	if customUAPatterns != "" {
 		for _, p := range strings.Split(customUAPatterns, ",") {
 			p = strings.TrimSpace(p)
@@ -181,18 +138,12 @@ func NewHealthCheckFilter(enabled bool, customPatterns string, uaEnabled bool, c
 	}
 }
 
-// IsHealthCheck는 주어진 경로가 헬스체크 엔드포인트인지 확인함
-// 프리픽스 매칭 방식으로 검사 (예: /healthz/live도 매칭됨)
 func (f *HealthCheckFilter) IsHealthCheck(path string) bool {
-	// 필터가 비활성화되어 있으면 항상 false
 	if !f.enabled {
 		return false
 	}
-
-	// 대소문자 구분 없이 비교하기 위해 소문자로 변환
 	pathLower := strings.ToLower(path)
 	for _, pattern := range f.patterns {
-		// 프리픽스 매칭: /healthz로 시작하는 모든 경로 매칭
 		if strings.HasPrefix(pathLower, pattern) {
 			return true
 		}
@@ -200,14 +151,6 @@ func (f *HealthCheckFilter) IsHealthCheck(path string) bool {
 	return false
 }
 
-// Patterns는 설정된 헬스체크 패턴 목록을 반환함
-// 로깅 및 디버깅 용도
-func (f *HealthCheckFilter) Patterns() []string {
-	return f.patterns
-}
-
-// IsHealthCheckUA는 주어진 User-Agent가 헬스체크 에이전트인지 확인함
-// 프리픽스 매칭 방식으로 검사 (대소문자 무시)
 func (f *HealthCheckFilter) IsHealthCheckUA(userAgent string) bool {
 	if !f.uaEnabled || userAgent == "" {
 		return false
@@ -221,17 +164,9 @@ func (f *HealthCheckFilter) IsHealthCheckUA(userAgent string) bool {
 	return false
 }
 
-// UAPatterns는 설정된 UA 헬스체크 패턴 목록을 반환함
-func (f *HealthCheckFilter) UAPatterns() []string {
-	return f.uaPatterns
-}
+func (f *HealthCheckFilter) Patterns() []string   { return f.patterns }
+func (f *HealthCheckFilter) UAPatterns() []string { return f.uaPatterns }
 
-// NewL7Handler는 새로운 L7 HTTP 이벤트 핸들러를 생성함
-// reader: eBPF 링 버퍼에서 이벤트를 읽는 리더
-// mapper: IP 주소를 K8s 메타데이터로 변환하는 매퍼
-// counter: Prometheus 메트릭 카운터
-// healthFilter: 헬스체크 필터
-// processFilter: 프로세스 필터
 func NewL7Handler(reader *ringbuf.Reader, mapper *k8smapper.Mapper, counter *prometheus.CounterVec, healthFilter *HealthCheckFilter, processFilter *L7ProcessFilter) *L7Handler {
 	return &L7Handler{
 		reader:        reader,
@@ -242,183 +177,140 @@ func NewL7Handler(reader *ringbuf.Reader, mapper *k8smapper.Mapper, counter *pro
 	}
 }
 
-// Run은 L7 이벤트 처리 루프를 시작함
-// 컨텍스트가 취소될 때까지 무한 루프로 이벤트를 처리
 func (h *L7Handler) Run(ctx context.Context) error {
 	log.Println("[L7] Handler started; waiting for HTTP request events")
-
-	// 헬스체크 필터 설정 로깅
-	if h.healthFilter.enabled {
-		log.Printf("[L7] Health check filter enabled, patterns=%v", h.healthFilter.Patterns())
-	} else {
-		log.Println("[L7] Health check filter disabled")
-	}
-
-	// UA 헬스체크 필터 설정 로깅
-	if h.healthFilter.uaEnabled {
-		log.Printf("[L7] User-Agent health check filter enabled, patterns=%v", h.healthFilter.UAPatterns())
-	} else {
-		log.Println("[L7] User-Agent health check filter disabled")
-	}
-
-	// 프로세스 필터 설정 로깅
-	log.Printf("[L7] Process filter excludeComms=%v (count=%d)", h.processFilter.ExcludeCommsList(), len(h.processFilter.excludeComms))
-
-	// 메인 이벤트 처리 루프
 	for {
-		// 컨텍스트 취소 확인 (graceful shutdown)
 		select {
 		case <-ctx.Done():
-			log.Println("[L7] Handler stopped")
 			return ctx.Err()
 		default:
-			// 계속 진행
 		}
-
-		// 링 버퍼에서 다음 레코드 읽기 (블로킹 호출)
 		record, err := h.reader.Read()
 		if err != nil {
-			// 링 버퍼가 닫힌 경우 (정상 종료)
 			if errors.Is(err, ringbuf.ErrClosed) {
-				log.Println("[L7] ringbuf reader closed; exiting")
 				return nil
 			}
-			// 읽기 오류 (로깅 후 계속 시도)
 			log.Printf("[L7] ringbuf read error: %v", err)
 			continue
 		}
-
-		// 레코드 처리
 		h.processRecord(record)
 	}
 }
 
-// processRecord는 단일 HTTP 이벤트 레코드를 처리함
 func (h *L7Handler) processRecord(record ringbuf.Record) {
-	// 레코드 크기 검증
 	if len(record.RawSample) < httpEventSize {
-		log.Printf("[L7] decode error: short sample (%d bytes, want %d)", len(record.RawSample), httpEventSize)
 		return
 	}
 
-	// 바이트 배열을 HTTPEvent 구조체로 파싱
 	event := h.parseEvent(record.RawSample)
+	method, path, userAgent := parseHTTPPayload(event.Payload[:], event.PayloadLen)
+	comm := bytesToString(event.Comm[:])
+	srcIP := uint32ToIP(event.Saddr)
 
-	// 바이트 배열에서 문자열 추출 (널 종료 처리)
-	method := bytesToString(event.Method[:])       // HTTP 메서드 (예: GET, POST)
-	path := bytesToString(event.Path[:])           // 요청 경로 (예: /api/users)
-	comm := bytesToString(event.Comm[:])           // 프로세스 이름 (예: nginx)
-	userAgent := bytesToString(event.UserAgent[:]) // User-Agent 헤더
-
-	// IP 주소 변환 (uint32 → net.IP)
-	srcIP := uint32ToIP(event.Saddr) // 클라이언트 IP
-	// dstIP := uint32ToIP(event.Daddr) // 현재 사용 안함
-
-	// 프로세스 필터 적용 (모니터링 에이전트 제외)
-	if excluded, matchedPrefix := h.processFilter.ShouldExclude(comm); excluded {
-		log.Printf("[L7][FILTERED] src=%s method=%s path=%s comm=%s matched=%s (process excluded)", srcIP, method, path, comm, matchedPrefix)
-		return // 모니터링 프로세스는 메트릭에 포함하지 않음
+	// 프로세스 필터링
+	if excluded, _ := h.processFilter.ShouldExclude(comm); excluded {
+		return
 	}
 
-	// 헬스체크 필터 적용 (메트릭에서 완전히 제외)
+	// 헬스체크 필터링 (Path)
 	if h.healthFilter.IsHealthCheck(path) {
-		log.Printf("[L7][FILTERED] src=%s method=%s path=%s comm=%s (healthcheck excluded)", srcIP, method, path, comm)
-		return // 헬스체크는 메트릭에 포함하지 않음
+		log.Printf("[L7][FILTERED] src=%s path=%s (healthcheck excluded)", srcIP, path)
+		return
 	}
 
-	// User-Agent 기반 헬스체크 필터 적용 (ALB/kube-probe 등)
+	// 헬스체크 필터링 (User-Agent)
 	if h.healthFilter.IsHealthCheckUA(userAgent) {
-		log.Printf("[L7][FILTERED] src=%s method=%s path=%s comm=%s ua=%s (healthcheck ua excluded)",
-			srcIP, method, path, comm, userAgent)
-		return // 헬스체크 UA는 메트릭에 포함하지 않음
+		log.Printf("[L7][FILTERED] src=%s ua=%s (healthcheck ua excluded)", srcIP, userAgent)
+		return
 	}
 
 	// K8s 메타데이터 조회
-	// 기본값 설정 (매핑 실패 시 "unknown" 사용)
 	var ns, svc, pod string = "unknown", "unknown", "unknown"
-
-	// 목적지 IP로 K8s 메타데이터 조회 시도
-	// 현재 구현에서 daddr는 0일 수 있음 (sys_enter_read에서 로컬 주소 미수집)
 	if event.Daddr != 0 {
 		dstIP := uint32ToIP(event.Daddr)
 		if meta, ok := h.mapper.Lookup(dstIP.String()); ok {
-			ns = meta.Namespace // 네임스페이스 (예: default)
-			svc = meta.Service  // 서비스 이름 (예: my-service)
-			pod = meta.Pod      // Pod 이름 (예: my-service-abc123)
+			ns, svc, pod = meta.Namespace, meta.Service, meta.Pod
 		}
 	}
 
-	// Prometheus 메트릭 업데이트
-	// 라벨: source_ip, destination_namespace, destination_service, destination_pod, method, path, process_comm
-	h.counter.WithLabelValues(
-		srcIP.String(), // 클라이언트 IP
-		ns,             // 목적지 네임스페이스
-		svc,            // 목적지 서비스
-		pod,            // 목적지 Pod
-		method,         // HTTP 메서드
-		path,           // 요청 경로 (eBPF에서 깊이 제한됨)
-		comm,           // 요청을 처리한 프로세스
-	).Inc() // 카운터 1 증가
-
-	dstIP := uint32ToIP(event.Daddr)
-	log.Printf("[L7][COUNTED] src=%s dst=%s ns=%s svc=%s pod=%s method=%s path=%s comm=%s",
-		srcIP, dstIP, ns, svc, pod, method, path, comm)
+	h.counter.WithLabelValues(srcIP.String(), ns, svc, pod, method, path, comm).Inc()
+	log.Printf("[L7][COUNTED] src=%s ns=%s svc=%s method=%s path=%s ua=%s", srcIP, ns, svc, method, path, userAgent)
 }
 
-// parseEvent는 원시 바이트를 HTTPEvent 구조체로 파싱함
-// 바이트 오프셋을 기반으로 각 필드를 추출
-//
-// IP 주소 바이트 오더 처리:
-// - eBPF에서 IP 주소는 network byte order (빅 엔디안)로 저장됨
-// - 링버퍼를 통해 전송된 raw 바이트를 그대로 BigEndian으로 읽음
-// - 이렇게 하면 uint32ToIP에서 추가 변환 없이 바로 사용 가능
-//
-// 기타 필드 바이트 오더:
-// - 포트: 소스 포트는 network byte order, 로컬 포트는 host byte order (혼재)
-// - PID: host byte order (리틀 엔디안)
-// - 문자열 필드: 바이트 순서 무관
 func (h *L7Handler) parseEvent(raw []byte) HTTPEvent {
 	var event HTTPEvent
-
-	// IP 주소: network byte order (빅 엔디안)로 저장되어 있으므로 BigEndian으로 읽음
-	event.Saddr = binary.BigEndian.Uint32(raw[0:4]) // 오프셋 0-3: 소스 IP (network byte order)
-	event.Daddr = binary.BigEndian.Uint32(raw[4:8]) // 오프셋 4-7: 목적지 IP (network byte order)
-
-	// 포트 및 PID: host byte order (리틀 엔디안)
-	event.Sport = binary.LittleEndian.Uint16(raw[8:10])  // 오프셋 8-9: 소스 포트
-	event.Dport = binary.LittleEndian.Uint16(raw[10:12]) // 오프셋 10-11: 목적지 포트
-	event.Pid = binary.LittleEndian.Uint32(raw[12:16])   // 오프셋 12-15: PID
-
-	// 문자열 필드: 바이트 복사
-	copy(event.Comm[:], raw[16:32])        // 오프셋 16-31: 프로세스 이름 (16바이트)
-	copy(event.Method[:], raw[32:40])      // 오프셋 32-39: HTTP 메서드 (8바이트)
-	copy(event.Path[:], raw[40:104])       // 오프셋 40-103: 요청 경로 (64바이트)
-	copy(event.UserAgent[:], raw[104:136]) // 오프셋 104-135: User-Agent (32바이트)
-
+	event.Saddr = binary.BigEndian.Uint32(raw[0:4])
+	event.Daddr = binary.BigEndian.Uint32(raw[4:8])
+	event.Sport = binary.LittleEndian.Uint16(raw[8:10])
+	event.Dport = binary.LittleEndian.Uint16(raw[10:12])
+	event.Pid = binary.LittleEndian.Uint32(raw[12:16])
+	copy(event.Comm[:], raw[16:32])
+	event.PayloadLen = binary.LittleEndian.Uint32(raw[32:36])
+	copy(event.Payload[:], raw[36:292])
 	return event
 }
 
-// Close는 링 버퍼 리더를 닫음
-// 핸들러 종료 시 호출하여 리소스 해제
-func (h *L7Handler) Close() error {
-	return h.reader.Close()
-}
-
-// bytesToString은 널 종료된 바이트 배열을 문자열로 변환함
-// C 스타일 문자열 처리 (널 문자 이후는 무시)
-func bytesToString(b []byte) string {
-	// 널 문자 위치 찾기
-	if idx := bytes.IndexByte(b, 0); idx != -1 {
-		return string(b[:idx]) // 널 문자 전까지만 반환
+// parseHTTPPayload는 Raw Payload에서 HTTP 정보를 파싱함
+func parseHTTPPayload(payload []byte, length uint32) (method, path, userAgent string) {
+	if length > 256 {
+		length = 256
 	}
-	return string(b) // 널 문자 없으면 전체 반환
+	data := payload[:length]
+
+	// Request Line 파싱 (첫 줄)
+	firstLineEnd := bytes.Index(data, []byte("\r\n"))
+	if firstLineEnd < 0 {
+		firstLineEnd = len(data)
+	}
+	requestLine := string(data[:firstLineEnd])
+	parts := strings.SplitN(requestLine, " ", 3)
+	if len(parts) >= 2 {
+		method = parts[0]
+		path = applyPathLimit(parts[1])
+	}
+
+	// User-Agent 헤더 검색 (Case-Insensitive)
+	dataLower := bytes.ToLower(data)
+	uaIdx := bytes.Index(dataLower, []byte("user-agent:"))
+	if uaIdx >= 0 {
+		valueStart := uaIdx + len("user-agent:")
+		remaining := data[valueStart:]
+		lineEnd := bytes.Index(remaining, []byte("\r\n"))
+		if lineEnd < 0 {
+			lineEnd = len(remaining)
+		}
+		userAgent = strings.TrimSpace(string(remaining[:lineEnd]))
+		if len(userAgent) > 31 {
+			userAgent = userAgent[:31]
+		}
+	}
+
+	return
 }
 
-// uint32ToIP는 uint32 값을 net.IP로 변환함
-// parseEvent에서 이미 BigEndian으로 읽었으므로 올바른 바이트 순서를 유지함
-// 예: 127.0.0.1 → 0x7F000001 → [127, 0, 0, 1]
+// applyPathLimit은 경로의 Depth를 2로 제한함 (eBPF 기존 로직 Go 구현)
+func applyPathLimit(path string) string {
+	if path == "" || path == "/" {
+		return path
+	}
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if len(parts) > 2 {
+		return "/" + parts[0] + "/" + parts[1] + "/*"
+	}
+	return path
+}
+
+func (h *L7Handler) Close() error { return h.reader.Close() }
+
+func bytesToString(b []byte) string {
+	if idx := bytes.IndexByte(b, 0); idx != -1 {
+		return string(b[:idx])
+	}
+	return string(b)
+}
+
 func uint32ToIP(addr uint32) net.IP {
-	ip := make(net.IP, net.IPv4len)  // 4바이트 IPv4 주소
-	binary.BigEndian.PutUint32(ip, addr) // BigEndian으로 쓰면 올바른 IP 형식
+	ip := make(net.IP, net.IPv4len)
+	binary.BigEndian.PutUint32(ip, addr)
 	return ip
 }

@@ -174,12 +174,13 @@ func main() {
 
 		var l7Objs L7ReceiverObjects
 		if err := LoadL7ReceiverObjects(&l7Objs, nil); err != nil {
-			log.Fatalf("[L7] failed to load BPF objects: %v", err)
-		}
-		defer l7Objs.Close()
+			log.Printf("[L7] WARNING: failed to load BPF objects, L7 disabled: %v", err)
+		} else {
+			defer l7Objs.Close()
+			log.Println("[L7] BPF objects loaded successfully")
 
-		// Attach tracepoints for accept4 syscall (connection accept)
-		tpAcceptEnter, err := link.Tracepoint("syscalls", "sys_enter_accept4", l7Objs.SysEnterAccept4, nil)
+			// Attach tracepoints for accept4 syscall (connection accept)
+			tpAcceptEnter, err := link.Tracepoint("syscalls", "sys_enter_accept4", l7Objs.SysEnterAccept4, nil)
 		if err != nil {
 			log.Fatalf("[L7] failed to attach sys_enter_accept4: %v", err)
 		}
