@@ -68,6 +68,7 @@ struct http_event {
     char comm[16];        // Process name
     char method[8];       // HTTP Method (GET, POST, PUT, DELETE, HEAD, PATCH, OPTIONS)
     char path[64];        // Request Path (Depth 2 limited, e.g., /api/users/*)
+    char user_agent[32];  // User-Agent header prefix (for health check filtering)
 };
 
 // ============================================================================
@@ -97,5 +98,7 @@ struct http_event {
 #define MAX_PATH_DEPTH     2       // Maximum path depth before truncation
 #define MAX_PATH_LEN       64      // Maximum path length in bytes
 #define MAX_METHOD_LEN     8       // Maximum HTTP method length
+#define MAX_USER_AGENT_LEN 32      // Maximum User-Agent field length
+#define HTTP_BUF_SIZE      256     // HTTP request read buffer size
 
 #endif // __BPF_COMMON_TYPES_H__

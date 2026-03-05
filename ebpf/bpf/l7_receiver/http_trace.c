@@ -88,21 +88,24 @@ static __always_inline bool is_http_request(const char *buf)
     return false;
 }
 
-// HTTP 요청에서 메서드와 경로를 파싱하는 함수
+// HTTP 요청에서 메서드, 경로, User-Agent를 파싱하는 함수
 // 경로는 MAX_PATH_DEPTH 레벨로 제한됨 (예: /api/users/* 형태로 잘림)
+// User-Agent는 헬스체크 필터링용으로 최대 31바이트까지 추출
 static __always_inline void parse_http_request(
     const char *buf,        // HTTP 요청 버퍼 포인터
     __s64 len,              // 버퍼 길이
     char *method_out,       // 메서드 출력 버퍼
-    char *path_out)         // 경로 출력 버퍼
+    char *path_out,         // 경로 출력 버퍼
+    char *ua_out)           // User-Agent 출력 버퍼
 {
-    char local_buf[128];    // 로컬 버퍼 (스택에 할당, BPF 스택 크기 제한 고려)
-    int read_len = len > 127 ? 127 : len;  // 최대 127바이트만 읽기
+    char local_buf[HTTP_BUF_SIZE]; // 로컬 버퍼 (256B, ALB X-Forwarded-* 헤더 대응)
+    int read_len = len > (HTTP_BUF_SIZE - 1) ? (HTTP_BUF_SIZE - 1) : len;
 
     // 요청 라인을 로컬 버퍼로 읽기
     if (bpf_probe_read_user(local_buf, read_len, buf) < 0) {
         method_out[0] = '\0';  // 읽기 실패 시 빈 문자열
         path_out[0] = '\0';
+        ua_out[0] = '\0';
         return;
     }
     local_buf[read_len] = '\0';  // 널 종료
@@ -120,6 +123,7 @@ static __always_inline void parse_http_request(
     int path_start = i + 1;
     if (path_start >= read_len) {
         path_out[0] = '\0';  // 경로 없음
+        ua_out[0] = '\0';
         return;
     }
 
@@ -150,6 +154,31 @@ static __always_inline void parse_http_request(
         path_out[path_idx++] = c;  // 경로 문자 복사
     }
     path_out[path_idx] = '\0';  // 널 종료
+
+    // ================================================================
+    // User-Agent 헤더 추출
+    // "User-Agent: " 패턴 검색 (12바이트: U,s,e,r,-,A,g,e,n,t,:, )
+    // bounded loop 사용 (커널 5.3+ bounded loop 활용, #pragma unroll 미사용)
+    // ================================================================
+    ua_out[0] = '\0';
+    for (int s = 0; s < 240 && (s + 14) <= read_len; s++) {
+        if (local_buf[s]    == 'U' && local_buf[s+1]  == 's' &&
+            local_buf[s+2]  == 'e' && local_buf[s+3]  == 'r' &&
+            local_buf[s+4]  == '-' && local_buf[s+5]  == 'A' &&
+            local_buf[s+6]  == 'g' && local_buf[s+7]  == 'e' &&
+            local_buf[s+8]  == 'n' && local_buf[s+9]  == 't' &&
+            local_buf[s+10] == ':' && local_buf[s+11] == ' ')
+        {
+            int ua_start = s + 12;
+            int ua_idx = 0;
+            for (int k = ua_start; k < read_len && ua_idx < (MAX_USER_AGENT_LEN - 1); k++) {
+                if (local_buf[k] == '\r' || local_buf[k] == '\n') break;
+                ua_out[ua_idx++] = local_buf[k];
+            }
+            ua_out[ua_idx] = '\0';
+            break;  // 첫 번째 매칭에서 종료
+        }
+    }
 }
 
 // ============================================================================
@@ -363,7 +392,7 @@ int sys_exit_read(struct trace_event_raw_sys_exit *ctx)
 
     // HTTP 메서드와 경로 파싱
     // args->buf는 __u64로 저장된 포인터 주소이므로 char*로 캐스팅
-    parse_http_request((const char *)args->buf, bytes_read, e->method, e->path);
+    parse_http_request((const char *)args->buf, bytes_read, e->method, e->path, e->user_agent);
 
     // 이벤트를 링 버퍼에 제출 (유저스페이스로 전송)
     bpf_ringbuf_submit(e, 0);
