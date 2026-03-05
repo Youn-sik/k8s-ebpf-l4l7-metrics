@@ -38,6 +38,7 @@ func main() {
 
 	log.Printf("[CONFIG] mode=%s, metricsAddr=%s", cfg.Mode, cfg.MetricsAddr)
 	log.Printf("[CONFIG] L4 enabled=%t, L7 enabled=%t", cfg.EnableL4, cfg.EnableL7)
+	log.Printf("[CONFIG] FilterHealthCheckUA=%t", cfg.FilterHealthCheckUA)
 
 	// ==========================================================================
 	// K8s Mapper
@@ -225,7 +226,7 @@ func main() {
 			log.Fatalf("[L7] failed to create ringbuf reader: %v", err)
 		}
 
-		healthFilter := NewHealthCheckFilter(cfg.FilterHealthCheck, cfg.HealthCheckPaths)
+		healthFilter := NewHealthCheckFilter(cfg.FilterHealthCheck, cfg.HealthCheckPaths, cfg.FilterHealthCheckUA, cfg.HealthCheckUserAgents)
 		processFilter := NewL7ProcessFilter(cfg.L7ExcludeComms)
 		l7Handler := NewL7Handler(l7Reader, mapper, l7Counter, healthFilter, processFilter)
 
@@ -262,10 +263,12 @@ type Config struct {
 	MapperOpts        k8smapper.Options
 	EnableL4          bool
 	EnableL7          bool
-	ExcludeComms      string            // L4 제외 프로세스 (콤마 구분)
-	FilterHealthCheck bool              // L7 헬스체크 필터 활성화
-	HealthCheckPaths  string            // L7 추가 헬스체크 경로 (콤마 구분)
-	L7ExcludeComms    string            // L7 제외 프로세스 (콤마 구분)
+	ExcludeComms          string // L4 제외 프로세스 (콤마 구분)
+	FilterHealthCheck     bool   // L7 헬스체크 필터 활성화
+	HealthCheckPaths      string // L7 추가 헬스체크 경로 (콤마 구분)
+	FilterHealthCheckUA   bool   // L7 UA 기반 헬스체크 필터 활성화
+	HealthCheckUserAgents string // 커스텀 UA 패턴 (콤마 구분)
+	L7ExcludeComms        string // L7 제외 프로세스 (콤마 구분)
 }
 
 func loadConfig() Config {
@@ -275,9 +278,11 @@ func loadConfig() Config {
 		EnableL4:          getEnvBool("ENABLE_L4", true),
 		EnableL7:          getEnvBool("ENABLE_L7_HTTP", false),
 		ExcludeComms:      os.Getenv("EXCLUDE_COMMS"),
-		FilterHealthCheck: getEnvBool("FILTER_HEALTHCHECK", true),
-		HealthCheckPaths:  os.Getenv("HEALTHCHECK_PATHS"),
-		L7ExcludeComms:    os.Getenv("L7_EXCLUDE_COMMS"),
+		FilterHealthCheck:     getEnvBool("FILTER_HEALTHCHECK", true),
+		HealthCheckPaths:      os.Getenv("HEALTHCHECK_PATHS"),
+		FilterHealthCheckUA:   getEnvBool("FILTER_HEALTHCHECK_UA", true),
+		HealthCheckUserAgents: os.Getenv("HEALTHCHECK_USER_AGENTS"),
+		L7ExcludeComms:        os.Getenv("L7_EXCLUDE_COMMS"),
 	}
 
 	// Mapper options
