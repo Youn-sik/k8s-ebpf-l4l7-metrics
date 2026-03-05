@@ -51,7 +51,7 @@ spec:
       terminationGracePeriodSeconds: 10
       containers:
         - name: agent
-          image: registry.skuberplus.com/library/k8s-ebpf-l4l7-metrics:0.0.13
+          image: registry.skuberplus.com/library/k8s-ebpf-l4l7-metrics:0.0.15
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
@@ -73,6 +73,10 @@ spec:
               value: "true"
             - name: FILTER_HEALTHCHECK
               value: "true"
+            - name: FILTER_HEALTHCHECK_UA
+              value: "true"
+            - name: HEALTHCHECK_USER_AGENTS
+              value: ""
             # L7 프로세스 필터 (기본: node_exporter, victoria-metric, prometheus 등)
             # 추가 제외가 필요하면 콤마로 구분하여 지정
             - name: L7_EXCLUDE_COMMS
