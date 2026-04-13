@@ -2,7 +2,7 @@ PROJECT ?= library/k8s-ebpf-l4l7-metrics
 VERSION ?= 0.0.01
 REGISTRY ?= registry.skuberplus.com
 IMAGE ?= $(REGISTRY)/$(PROJECT):$(VERSION)
-GO_VERSION ?= 1.25.1
+GO_VERSION ?= 1.25.9
 # buildx multi-arch settings
 PLATFORMS ?= linux/amd64,linux/arm64
 PUSH ?= false

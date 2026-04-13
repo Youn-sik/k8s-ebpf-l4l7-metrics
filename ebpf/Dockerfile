@@ -1,5 +1,5 @@
 # Build agent binary
-ARG GO_VERSION=1.25.1
+ARG GO_VERSION=1.25.9
 FROM golang:${GO_VERSION}-alpine AS builder
 
 # buildx가 주입하는 타깃 아키텍처/OS 사용
