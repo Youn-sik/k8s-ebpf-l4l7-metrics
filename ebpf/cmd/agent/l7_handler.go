@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/cilium/ebpf/ringbuf"                 // eBPF 링 버퍼 읽기 라이브러리
 	"github.com/prometheus/client_golang/prometheus" // Prometheus 메트릭 라이브러리
@@ -262,20 +263,24 @@ func parseHTTPPayload(payload []byte, length uint32) (method, path, userAgent st
 	}
 	data := payload[:length]
 
-	// Request Line 파싱 (첫 줄)
+	// Request Line 파싱 — CRLF 필수, 없으면 파싱 실패
 	firstLineEnd := bytes.Index(data, []byte("\r\n"))
 	if firstLineEnd < 0 {
-		firstLineEnd = len(data)
+		return "", "", ""
 	}
 	requestLine := string(data[:firstLineEnd])
 	parts := strings.SplitN(requestLine, " ", 3)
-	if len(parts) >= 2 {
-		if _, ok := validHTTPMethods[parts[0]]; !ok {
-			return "", "", ""
-		}
-		method = parts[0]
-		path = applyPathLimit(parts[1])
+	if len(parts) < 3 {
+		return "", "", ""
 	}
+	if _, ok := validHTTPMethods[parts[0]]; !ok {
+		return "", "", ""
+	}
+	method = parts[0]
+	if !utf8.ValidString(parts[1]) {
+		return "", "", ""
+	}
+	path = applyPathLimit(parts[1])
 
 	// User-Agent 헤더 검색 (Case-Insensitive)
 	dataLower := bytes.ToLower(data)

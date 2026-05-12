@@ -309,6 +309,60 @@ func TestBytesToString(t *testing.T) {
 	}
 }
 
+// 결함 ② 재현: CRLF 없는 바이너리 페이로드 → 수정 후 reject
+func TestParseHTTPPayload_Defect2_NoCRLF(t *testing.T) {
+	payload := make([]byte, 256)
+	copy(payload, []byte("POST /\xfe\xdb\x01\x80\x81\x82 HTTP/1.0\xc0\xc1\xc2\xc3"))
+
+	method, path, _ := parseHTTPPayload(payload, 256)
+
+	if method != "" || path != "" {
+		t.Errorf("no-CRLF payload should be rejected: method=%q path=%q", method, path)
+	}
+}
+
+// 결함 ② 수정: HTTP version 누락(2토큰) → reject
+func TestParseHTTPPayload_IncompleteRequestLine(t *testing.T) {
+	payload := make([]byte, 256)
+	copy(payload, []byte("POST /path\r\nHost: test\r\n\r\n"))
+
+	method, path, _ := parseHTTPPayload(payload, 256)
+
+	if method != "" || path != "" {
+		t.Errorf("incomplete request line should be rejected: method=%q path=%q", method, path)
+	}
+}
+
+// 결함 ② 수정: path에 invalid UTF-8 → reject
+func TestParseHTTPPayload_InvalidUTF8Path(t *testing.T) {
+	payload := make([]byte, 256)
+	copy(payload, []byte("POST /\xfe\xdb\x01 HTTP/1.1\r\nHost: test\r\n\r\n"))
+
+	method, path, _ := parseHTTPPayload(payload, 256)
+
+	if method != "" || path != "" {
+		t.Errorf("invalid UTF-8 path should be rejected: method=%q path=%q", method, path)
+	}
+}
+
+// 결함 ② 수정 확인: 정상 HTTP → 정상 파싱
+func TestParseHTTPPayload_ValidHTTP(t *testing.T) {
+	payload := make([]byte, 256)
+	copy(payload, []byte("GET /api/v1/users HTTP/1.1\r\nHost: example.com\r\nUser-Agent: curl/8.0\r\n\r\n"))
+
+	method, path, ua := parseHTTPPayload(payload, 256)
+
+	if method != "GET" {
+		t.Errorf("method = %q, want GET", method)
+	}
+	if path != "/api/v1/*" {
+		t.Errorf("path = %q, want /api/v1/*", path)
+	}
+	if ua != "curl/8.0" {
+		t.Errorf("ua = %q, want curl/8.0", ua)
+	}
+}
+
 // 결함 ① 재현: eBPF false positive (POST\n<binary>) → method 화이트리스트로 reject
 func TestParseHTTPPayload_Defect1_FalsePositive(t *testing.T) {
 	// 고객 dv86h 패턴: POST + \n(비공백) + 바이너리 + 우연한 공백 + 바이너리
