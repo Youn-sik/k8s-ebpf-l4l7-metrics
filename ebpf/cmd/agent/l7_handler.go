@@ -110,7 +110,7 @@ var defaultHealthCheckPatterns = []string{
 }
 
 var defaultHealthCheckUAPatterns = []string{
-	"elb-healthchecker", "kube-probe",
+	"elb-healthchecker", "kube-probe", "telb-healthchecker",
 }
 
 func NewHealthCheckFilter(enabled bool, customPatterns string, uaEnabled bool, customUAPatterns string) *HealthCheckFilter {
@@ -300,7 +300,7 @@ func parseHTTPPayload(payload []byte, length uint32) (method, path, userAgent st
 		}
 		userAgent = strings.TrimSpace(string(remaining[:lineEnd]))
 		if len(userAgent) > 31 {
-			userAgent = userAgent[:31]
+			userAgent = truncateUTF8Safe(userAgent, 31)
 		}
 	}
 
@@ -317,6 +317,28 @@ func applyPathLimit(path string) string {
 		return "/" + parts[0] + "/" + parts[1] + "/*"
 	}
 	return path
+}
+
+func truncateUTF8Safe(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
+		maxBytes--
+	}
+	truncated := s[:maxBytes]
+	if !utf8.ValidString(truncated) {
+		valid := 0
+		for valid < len(truncated) {
+			r, size := utf8.DecodeRuneInString(truncated[valid:])
+			if r == utf8.RuneError && size <= 1 {
+				break
+			}
+			valid += size
+		}
+		return truncated[:valid]
+	}
+	return truncated
 }
 
 func (h *L7Handler) Close() error { return h.reader.Close() }

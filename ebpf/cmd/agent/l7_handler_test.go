@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"unicode/utf8"
 )
 
 func TestHealthCheckFilter_NewHealthCheckFilter(t *testing.T) {
@@ -243,20 +244,20 @@ func TestHealthCheckFilter_UAPatterns(t *testing.T) {
 	filter := NewHealthCheckFilter(true, "", true, "my-checker,test-probe")
 	uaPatterns := filter.UAPatterns()
 
-	// 기본 2개 + 커스텀 2개 = 4개
-	if len(uaPatterns) != 4 {
-		t.Errorf("got %d UA patterns, want 4", len(uaPatterns))
+	// 기본 3개 (elb, kube-probe, telb) + 커스텀 2개 = 5개
+	if len(uaPatterns) != 5 {
+		t.Errorf("got %d UA patterns, want 5", len(uaPatterns))
 	}
 
 	// 기본 패턴 확인
 	defaultFound := 0
 	for _, p := range uaPatterns {
-		if p == "elb-healthchecker" || p == "kube-probe" {
+		if p == "elb-healthchecker" || p == "kube-probe" || p == "telb-healthchecker" {
 			defaultFound++
 		}
 	}
-	if defaultFound != 2 {
-		t.Errorf("expected 2 default UA patterns, found %d", defaultFound)
+	if defaultFound != 3 {
+		t.Errorf("expected 3 default UA patterns, found %d", defaultFound)
 	}
 
 	// 커스텀 패턴 확인
@@ -387,6 +388,58 @@ func TestParseHTTPPayload_ValidMethodPassthrough(t *testing.T) {
 		if method != m {
 			t.Errorf("valid method %q should pass, got %q", m, method)
 		}
+	}
+}
+
+// 결함 ③ 재현: 멀티바이트 UTF-8 UA가 [:31]로 잘리면 invalid UTF-8
+func TestParseHTTPPayload_Defect3_UATruncate(t *testing.T) {
+	// UA = "TELB-HealthChecker/2.0-테스트" (32B) → [:31] = "테스" + "트"의 앞 2B = invalid
+	payload := make([]byte, 256)
+	copy(payload, []byte("POST /push HTTP/1.1\r\nHost: test\r\nUser-Agent: TELB-HealthChecker/2.0-\xed\x85\x8c\xec\x8a\xa4\xed\x8a\xb8\r\n\r\n"))
+
+	_, _, ua := parseHTTPPayload(payload, 256)
+
+	if !utf8.ValidString(ua) {
+		t.Errorf("UA should be valid UTF-8 after safe truncation, got %q", ua)
+	}
+}
+
+// 결함 ③ 수정: truncateUTF8Safe 단위 테스트
+func TestTruncateUTF8Safe(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		maxBytes int
+	}{
+		{"ASCII only", "TELB-HealthChecker/2.0-abcdefgh", 31},
+		{"no truncation needed", "short", 31},
+		{"Korean mid-cut", "TELB-HealthChecker/2.0-\xed\x85\x8c\xec\x8a\xa4\xed\x8a\xb8", 31},
+		{"binary mid-cut", "TELB-HC/2.0\xfe\xdb\x01\x80\x81\x82\x83\x84\x85\x86\x87\x88\x89\x8a\x8b\x8c\x8d\x8e\x8f\x90\x91", 31},
+		{"multibyte rune boundary", "hello\xc3\xa9world", 6},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateUTF8Safe(tt.input, tt.maxBytes)
+			if len(got) > tt.maxBytes {
+				t.Errorf("len=%d exceeds maxBytes=%d", len(got), tt.maxBytes)
+			}
+			if !utf8.ValidString(got) {
+				t.Errorf("result %q is not valid UTF-8", got)
+			}
+		})
+	}
+}
+
+// TELB UA 화이트리스트 확인
+func TestHealthCheckFilter_TELB_UA(t *testing.T) {
+	filter := NewHealthCheckFilter(true, "", true, "")
+
+	if !filter.IsHealthCheckUA("TELB-HealthChecker/2.0") {
+		t.Error("TELB-HealthChecker/2.0 should be filtered")
+	}
+	if !filter.IsHealthCheckUA("telb-healthchecker/2.0") {
+		t.Error("telb-healthchecker/2.0 should be filtered (case insensitive)")
 	}
 }
 
