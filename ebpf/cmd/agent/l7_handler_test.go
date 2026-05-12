@@ -309,6 +309,33 @@ func TestBytesToString(t *testing.T) {
 	}
 }
 
+// 결함 ① 재현: eBPF false positive (POST\n<binary>) → method 화이트리스트로 reject
+func TestParseHTTPPayload_Defect1_FalsePositive(t *testing.T) {
+	// 고객 dv86h 패턴: POST + \n(비공백) + 바이너리 + 우연한 공백 + 바이너리
+	// CRLF가 있는 형태로 구성하여 결함 ①만 격리 검증
+	payload := make([]byte, 256)
+	copy(payload, []byte("BLAH /path HTTP/1.1\r\nHost: test\r\n\r\n"))
+
+	method, path, _ := parseHTTPPayload(payload, 256)
+
+	if method != "" || path != "" {
+		t.Errorf("invalid method should be rejected: method=%q path=%q", method, path)
+	}
+}
+
+// 결함 ① 수정 확인: 정상 HTTP method는 통과
+func TestParseHTTPPayload_ValidMethodPassthrough(t *testing.T) {
+	methods := []string{"GET", "POST", "PUT", "DELETE", "HEAD", "PATCH", "OPTIONS"}
+	for _, m := range methods {
+		payload := make([]byte, 256)
+		copy(payload, []byte(m+" /api HTTP/1.1\r\nHost: test\r\n\r\n"))
+		method, _, _ := parseHTTPPayload(payload, 256)
+		if method != m {
+			t.Errorf("valid method %q should pass, got %q", m, method)
+		}
+	}
+}
+
 func TestUint32ToIP(t *testing.T) {
 	tests := []struct {
 		name  string

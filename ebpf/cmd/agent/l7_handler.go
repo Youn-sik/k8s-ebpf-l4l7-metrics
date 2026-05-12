@@ -15,6 +15,11 @@ import (
 	"k8s-ebpf-l4l7-metrics/internal/k8smapper" // K8s 메타데이터 매퍼
 )
 
+var validHTTPMethods = map[string]struct{}{
+	"GET": {}, "POST": {}, "PUT": {}, "DELETE": {},
+	"HEAD": {}, "PATCH": {}, "OPTIONS": {},
+}
+
 // HTTPEvent는 eBPF에서 전송된 L7 HTTP 요청 이벤트를 나타냄
 // bpf/common/types.h의 struct http_event와 동일한 레이아웃
 type HTTPEvent struct {
@@ -265,6 +270,9 @@ func parseHTTPPayload(payload []byte, length uint32) (method, path, userAgent st
 	requestLine := string(data[:firstLineEnd])
 	parts := strings.SplitN(requestLine, " ", 3)
 	if len(parts) >= 2 {
+		if _, ok := validHTTPMethods[parts[0]]; !ok {
+			return "", "", ""
+		}
 		method = parts[0]
 		path = applyPathLimit(parts[1])
 	}
