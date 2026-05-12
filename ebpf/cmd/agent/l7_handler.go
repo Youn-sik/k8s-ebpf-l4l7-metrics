@@ -204,6 +204,12 @@ func (h *L7Handler) Run(ctx context.Context) error {
 }
 
 func (h *L7Handler) processRecord(record ringbuf.Record) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[L7][PANIC-RECOVERED] %v", r)
+		}
+	}()
+
 	if len(record.RawSample) < httpEventSize {
 		return
 	}
