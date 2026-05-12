@@ -1,0 +1,179 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    deployment.kubernetes.io/revision: "7"
+      {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{},"name":"load-generator","namespace":"ebpf-repro"},"spec":{"replicas":3,"selector":{"matchLabels":{"app":"load-generator"}},"template":{"metadata":{"labels":{"app":"load-generator"}},"spec":{"containers":[{"command":["/bin/sh","-c","apk add --no-cache curl netcat-openbsd \u003e/dev/null 2\u003e\u00261\necho \"Load Generator v2 started\"\n\n# ============================================================\n# 격차 1+2 해소: 바이너리 body + 최소 헤더 → Loki push\n# 헤더 ~80B → 256B 윈도우에 body ~176B 포함 → invalid UTF-8 유입\n# ============================================================\ngenerate_binary_loki_push() {\n  # 256바이트 바이너리 페이로드 생성 (snappy protobuf 시뮬레이션)\n  dd if=/dev/urandom of=/tmp/binary_payload bs=256 count=1 2\u003e/dev/null\n  while true; do\n    # 헤더 최소화: Host + Content-Type만 (~80B)\n    # eBPF가 256B 캡처 시 body 176B가 윈도우 안에 들어옴\n    curl -s -o /dev/null \\\n      -X POST \\\n      --data-binary @/tmp/binary_payload \\\n      -H \"Content-Type: application/x-protobuf\" \\\n      http://loki.ebpf-repro.svc:3100/loki/api/v1/push\n    sleep 0.01\n  done\n}\n\n# ============================================================\n# 격차 1+2 해소: 바이너리 body + 최소 헤더 → Mimir push\n# ============================================================\ngenerate_binary_mimir_push() {\n  dd if=/dev/urandom of=/tmp/binary_payload_mimir bs=256 count=1 2\u003e/dev/null\n  while true; do\n    curl -s -o /dev/null \\\n      -X POST \\\n      --data-binary @/tmp/binary_payload_mimir \\\n      -H \"Content-Type: application/x-protobuf\" \\\n      http://mimir-distributor.ebpf-repro.svc:8080/api/v1/push\n    sleep 0.01\n  done\n}\n\n# ============================================================\n# 결함 ③ 재현: UA truncate — UA \\r\\n이 256B 밖에 위치\n# curl은 UA를 ~70B 부근에 배치하므로 nc로 헤더 순서 직접 제어\n# Authorization(긴 JWT)을 UA 앞에 배치 → UA 시작점 235B\n# UA 값 21B만 256B 윈도우 안 → \\r\\n 미발견 → body 바이너리 유입\n# → userAgent[:31] 에서 바이너리 경계 truncate → invalid UTF-8\n#\n# 6875r 고객 패턴: TELB-HealthChecker/2.0\"\\x1d\\x8b\\x002...\n# ============================================================\ngenerate_ua_truncate() {\n  while true; do\n    # 결함 ③ 정확한 재현:\n    # UA 값 시작 = 210B, 256B까지 46B 남음\n    # UA 값 = \"TELB-HealthChecker/2.0\"(22B) + 바이너리(24B+) → \\r\\n은 256B 밖\n    # → lineEnd = len(remaining) = 46\n    # → userAgent = \"TELB-HealthChecker/2.0\\xfe\\xdb\\x01\\x80...\" (46B)\n    # → userAgent[:31] → \"TELB-HealthChecker/2.0\\xfe\\xdb\\x01\\x80\\x81\\x82\\x83\\x84\\x85\"\n    #   9번째 바이너리 바이트에서 절단 → invalid UTF-8 → panic\n    {\n      printf 'POST /api/v1/push HTTP/1.1\\r\\n'\n      printf 'Host: loki.ebpf-repro.svc:3100\\r\\n'\n      printf 'Content-Type: application/x-protobuf\\r\\n'\n      printf 'Content-Encoding: snappy\\r\\n'\n      printf 'Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJ0In0.pad-sig-extra\\r\\n'\n      printf 'User-Agent: TELB-HealthChecker/2.0\\x1d\\x8b\\x00\\x02\\xfe\\xdb\\x01\\x80\\x81\\x82\\x83\\x84\\x85\\x86\\x87\\x88\\x89\\x8a\\x8b\\x8c\\x8d\\x8e\\x8f\\x90\\x91\\x92\\x93\\x94\\x95\\x96\\x97\\x98\\x99\\x9a\\x9b\\x9c\\x9d\\x9e\\x9f\\xa0\\xa1\\xa2\\xa3\\xa4\\xa5\\xa6\\xa7\\xa8\\xa9\\xaa\\r\\n'\n      printf 'Content-Length: 10\\r\\n'\n      printf '\\r\\n'\n      printf '0123456789'\n    } | nc -w1 loki.ebpf-repro.svc 3100 2\u003e/dev/null\n\n    {\n      printf 'POST /api/v1/push HTTP/1.1\\r\\n'\n      printf 'Host: mimir-distributor.ebpf-repro.svc:8080\\r\\n'\n      printf 'Content-Type: application/x-protobuf\\r\\n'\n      printf 'Content-Encoding: snappy\\r\\n'\n      printf 'Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJ0In0.pad-sig-extra\\r\\n'\n      printf 'User-Agent: TELB-HealthChecker/2.0\\x1d\\x8b\\x00\\x02\\xfe\\xdb\\x01\\x80\\x81\\x82\\x83\\x84\\x85\\x86\\x87\\x88\\x89\\x8a\\x8b\\x8c\\x8d\\x8e\\x8f\\x90\\x91\\x92\\x93\\x94\\x95\\x96\\x97\\x98\\x99\\x9a\\x9b\\x9c\\x9d\\x9e\\x9f\\xa0\\xa1\\xa2\\xa3\\xa4\\xa5\\xa6\\xa7\\xa8\\xa9\\xaa\\r\\n'\n      printf 'Content-Length: 10\\r\\n'\n      printf '\\r\\n'\n      printf '0123456789'\n    } | nc -w1 mimir-distributor.ebpf-repro.svc 8080 2\u003e/dev/null\n    sleep 0.05\n  done\n}\n\n# ============================================================\n# 결함 ①+② 재현: eBPF false positive (5번째 바이트 비공백)\n# POST\\n(0x0A) + 바이너리 중간에 0x20(공백) 삽입\n# → eBPF: 첫 4바이트 POST 매치 → HTTP 오인 (5번째=\\n, 비공백)\n# → l7_handler: \\r\\n 없음 → 256B 전체 request line\n# → SplitN(\" \"): 바이너리 중 0x20 위치에서 split → invalid path\n# ============================================================\ngenerate_false_positive() {\n  while true; do\n    # POST(4B) + \\n(1B, 비공백=false positive) + binary + 0x20(공백) + binary\n    # 고객 dv86h 패턴: POST\\n\\x12\\xfe\\xdb... 중간에 우연한 공백\n    printf 'POST\\x0a\\x12\\xfe\\xdb\\x01\\x00\\x80\\xff\\xef\\xbe\\xad\\xde \\xfe\\xdb\\x01\\x80\\x81\\x82\\x83\\x84\\x85\\x86\\x87\\x88\\x89\\x8a\\x8b\\x8c\\x8d\\x8e\\x8f\\x90\\x91\\x92\\x93\\x94\\x95\\x96\\x97\\x98\\x99\\x9a\\x9b\\x9c\\x9d\\x9e\\x9f\\xa0' | nc -w1 loki.ebpf-repro.svc 3100 2\u003e/dev/null\n    printf 'POST\\x0a\\x12\\xfe\\xdb\\x01\\x00\\x80\\xff\\xef\\xbe\\xad\\xde \\xfe\\xdb\\x01\\x80\\x81\\x82\\x83\\x84\\x85' | nc -w1 mimir-distributor.ebpf-repro.svc 8080 2\u003e/dev/null\n    printf 'POST\\x0a\\x12\\xfe\\xdb\\x01\\x00\\x80\\xff\\xef\\xbe\\xad\\xde \\xfe\\xdb\\x01\\x80\\x81\\x82\\x83\\x84\\x85' | nc -w1 dummy-web.ebpf-repro.svc 80 2\u003e/dev/null\n    # 기존 결함 ②: POST + 공백 + 바이너리 path (CRLF 없음)\n    printf 'POST /\\xfe\\xdb\\x01\\x80\\x81\\x82 HTTP/1.0\\xc0\\xc1\\xc2\\xc3\\xc4\\xc5' | nc -w1 loki.ebpf-repro.svc 3100 2\u003e/dev/null\n    printf 'POST /\\xfe\\xdb\\x01\\x80\\x81\\x82 HTTP/1.0\\xc0\\xc1\\xc2\\xc3\\xc4\\xc5' | nc -w1 dummy-web.ebpf-repro.svc 80 2\u003e/dev/null\n    sleep 0.05\n  done\n}\n\n# TELB UA 헬스체크 증폭\ngenerate_telb_flood() {\n  while true; do\n    curl -s -o /dev/null -A \"TELB-HealthChecker/2.0\" http://loki.ebpf-repro.svc:3100/ready\n    curl -s -o /dev/null -A \"TELB-HealthChecker/2.0\" http://mimir-distributor.ebpf-repro.svc:8080/ready\n    sleep 0.1\n  done\n}\n\n# 6가지 트래픽 병렬 실행\ngenerate_binary_loki_push \u0026       # 결함 ②: 바이너리 body + 최소 헤더\ngenerate_binary_mimir_push \u0026      # 결함 ②: 바이너리 body + 최소 헤더\ngenerate_ua_truncate \u0026            # 결함 ③: UA 256B 경계 truncate\ngenerate_false_positive \u0026         # 결함 ①+②: eBPF false positive\ngenerate_telb_flood \u0026             # TELB UA 화이트리스트 누락\nwait\n"],"image":"alpine:3.21","name":"load-gen","resources":{"limits":{"memory":"128Mi"},"requests":{"cpu":"100m","memory":"64Mi"}}}],"nodeSelector":{"eks.amazonaws.com/nodegroup":"ebpf-repro-ng"}}}}}
+  name: load-generator
+  namespace: ebpf-repro
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 0
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: load-generator
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: load-generator
+    spec:
+      containers:
+      - command:
+        - /bin/sh
+        - -c
+        - |
+          apk add --no-cache curl netcat-openbsd >/dev/null 2>&1
+          echo "Load Generator v2 started"
+
+          # ============================================================
+          # 격차 1+2 해소: 바이너리 body + 최소 헤더 → Loki push
+          # 헤더 ~80B → 256B 윈도우에 body ~176B 포함 → invalid UTF-8 유입
+          # ============================================================
+          generate_binary_loki_push() {
+            # 256바이트 바이너리 페이로드 생성 (snappy protobuf 시뮬레이션)
+            dd if=/dev/urandom of=/tmp/binary_payload bs=256 count=1 2>/dev/null
+            while true; do
+              # 헤더 최소화: Host + Content-Type만 (~80B)
+              # eBPF가 256B 캡처 시 body 176B가 윈도우 안에 들어옴
+              curl -s -o /dev/null \
+                -X POST \
+                --data-binary @/tmp/binary_payload \
+                -H "Content-Type: application/x-protobuf" \
+                http://loki.ebpf-repro.svc:3100/loki/api/v1/push
+              sleep 0.01
+            done
+          }
+
+          # ============================================================
+          # 격차 1+2 해소: 바이너리 body + 최소 헤더 → Mimir push
+          # ============================================================
+          generate_binary_mimir_push() {
+            dd if=/dev/urandom of=/tmp/binary_payload_mimir bs=256 count=1 2>/dev/null
+            while true; do
+              curl -s -o /dev/null \
+                -X POST \
+                --data-binary @/tmp/binary_payload_mimir \
+                -H "Content-Type: application/x-protobuf" \
+                http://mimir-distributor.ebpf-repro.svc:8080/api/v1/push
+              sleep 0.01
+            done
+          }
+
+          # ============================================================
+          # 결함 ③ 재현: UA truncate — UA \r\n이 256B 밖에 위치
+          # curl은 UA를 ~70B 부근에 배치하므로 nc로 헤더 순서 직접 제어
+          # Authorization(긴 JWT)을 UA 앞에 배치 → UA 시작점 235B
+          # UA 값 21B만 256B 윈도우 안 → \r\n 미발견 → body 바이너리 유입
+          # → userAgent[:31] 에서 바이너리 경계 truncate → invalid UTF-8
+          #
+          # 6875r 고객 패턴: TELB-HealthChecker/2.0"\x1d\x8b\x002...
+          # ============================================================
+          generate_ua_truncate() {
+            while true; do
+              # 결함 ③ 정확한 재현:
+              # UA 값 시작 = 210B, 256B까지 46B 남음
+              # UA 값 = "TELB-HealthChecker/2.0"(22B) + 바이너리(24B+) → \r\n은 256B 밖
+              # → lineEnd = len(remaining) = 46
+              # → userAgent = "TELB-HealthChecker/2.0\xfe\xdb\x01\x80..." (46B)
+              # → userAgent[:31] → "TELB-HealthChecker/2.0\xfe\xdb\x01\x80\x81\x82\x83\x84\x85"
+              #   9번째 바이너리 바이트에서 절단 → invalid UTF-8 → panic
+              {
+                printf 'POST /api/v1/push HTTP/1.1\r\n'
+                printf 'Host: loki.ebpf-repro.svc:3100\r\n'
+                printf 'Content-Type: application/x-protobuf\r\n'
+                printf 'Content-Encoding: snappy\r\n'
+                printf 'Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJ0In0.pad-sig-extra\r\n'
+                printf 'User-Agent: TELB-HealthChecker/2.0\x1d\x8b\x00\x02\xfe\xdb\x01\x80\x81\x82\x83\x84\x85\x86\x87\x88\x89\x8a\x8b\x8c\x8d\x8e\x8f\x90\x91\x92\x93\x94\x95\x96\x97\x98\x99\x9a\x9b\x9c\x9d\x9e\x9f\xa0\xa1\xa2\xa3\xa4\xa5\xa6\xa7\xa8\xa9\xaa\r\n'
+                printf 'Content-Length: 10\r\n'
+                printf '\r\n'
+                printf '0123456789'
+              } | nc -w1 loki.ebpf-repro.svc 3100 2>/dev/null
+
+              {
+                printf 'POST /api/v1/push HTTP/1.1\r\n'
+                printf 'Host: mimir-distributor.ebpf-repro.svc:8080\r\n'
+                printf 'Content-Type: application/x-protobuf\r\n'
+                printf 'Content-Encoding: snappy\r\n'
+                printf 'Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJ0In0.pad-sig-extra\r\n'
+                printf 'User-Agent: TELB-HealthChecker/2.0\x1d\x8b\x00\x02\xfe\xdb\x01\x80\x81\x82\x83\x84\x85\x86\x87\x88\x89\x8a\x8b\x8c\x8d\x8e\x8f\x90\x91\x92\x93\x94\x95\x96\x97\x98\x99\x9a\x9b\x9c\x9d\x9e\x9f\xa0\xa1\xa2\xa3\xa4\xa5\xa6\xa7\xa8\xa9\xaa\r\n'
+                printf 'Content-Length: 10\r\n'
+                printf '\r\n'
+                printf '0123456789'
+              } | nc -w1 mimir-distributor.ebpf-repro.svc 8080 2>/dev/null
+              sleep 0.05
+            done
+          }
+
+          # ============================================================
+          # 결함 ①+② 재현: eBPF false positive (5번째 바이트 비공백)
+          # POST\n(0x0A) + 바이너리 중간에 0x20(공백) 삽입
+          # → eBPF: 첫 4바이트 POST 매치 → HTTP 오인 (5번째=\n, 비공백)
+          # → l7_handler: \r\n 없음 → 256B 전체 request line
+          # → SplitN(" "): 바이너리 중 0x20 위치에서 split → invalid path
+          # ============================================================
+          generate_false_positive() {
+            while true; do
+              # POST(4B) + \n(1B, 비공백=false positive) + binary + 0x20(공백) + binary
+              # 고객 dv86h 패턴: POST\n\x12\xfe\xdb... 중간에 우연한 공백
+              printf 'POST\x0a\x12\xfe\xdb\x01\x00\x80\xff\xef\xbe\xad\xde \xfe\xdb\x01\x80\x81\x82\x83\x84\x85\x86\x87\x88\x89\x8a\x8b\x8c\x8d\x8e\x8f\x90\x91\x92\x93\x94\x95\x96\x97\x98\x99\x9a\x9b\x9c\x9d\x9e\x9f\xa0' | nc -w1 loki.ebpf-repro.svc 3100 2>/dev/null
+              printf 'POST\x0a\x12\xfe\xdb\x01\x00\x80\xff\xef\xbe\xad\xde \xfe\xdb\x01\x80\x81\x82\x83\x84\x85' | nc -w1 mimir-distributor.ebpf-repro.svc 8080 2>/dev/null
+              printf 'POST\x0a\x12\xfe\xdb\x01\x00\x80\xff\xef\xbe\xad\xde \xfe\xdb\x01\x80\x81\x82\x83\x84\x85' | nc -w1 dummy-web.ebpf-repro.svc 80 2>/dev/null
+              # 기존 결함 ②: POST + 공백 + 바이너리 path (CRLF 없음)
+              printf 'POST /\xfe\xdb\x01\x80\x81\x82 HTTP/1.0\xc0\xc1\xc2\xc3\xc4\xc5' | nc -w1 loki.ebpf-repro.svc 3100 2>/dev/null
+              printf 'POST /\xfe\xdb\x01\x80\x81\x82 HTTP/1.0\xc0\xc1\xc2\xc3\xc4\xc5' | nc -w1 dummy-web.ebpf-repro.svc 80 2>/dev/null
+              sleep 0.05
+            done
+          }
+
+          # TELB UA 헬스체크 증폭
+          generate_telb_flood() {
+            while true; do
+              curl -s -o /dev/null -A "TELB-HealthChecker/2.0" http://loki.ebpf-repro.svc:3100/ready
+              curl -s -o /dev/null -A "TELB-HealthChecker/2.0" http://mimir-distributor.ebpf-repro.svc:8080/ready
+              sleep 0.1
+            done
+          }
+
+          # 6가지 트래픽 병렬 실행
+          generate_binary_loki_push &       # 결함 ②: 바이너리 body + 최소 헤더
+          generate_binary_mimir_push &      # 결함 ②: 바이너리 body + 최소 헤더
+          generate_ua_truncate &            # 결함 ③: UA 256B 경계 truncate
+          generate_false_positive &         # 결함 ①+②: eBPF false positive
+          generate_telb_flood &             # TELB UA 화이트리스트 누락
+          wait
+        image: alpine:3.21
+        imagePullPolicy: IfNotPresent
+        name: load-gen
+        resources:
+          limits:
+            memory: 128Mi
+          requests:
+            cpu: 100m
+            memory: 64Mi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+      dnsPolicy: ClusterFirst
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: ebpf-repro-ng
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
+  conditions:
+  - lastTransitionTime: "2026-05-11T05:55:54Z"
+    lastUpdateTime: "2026-05-11T06:59:43Z"
+    message: ReplicaSet "load-generator-7555b8679f" has successfully progressed.
+    reason: NewReplicaSetAvailable
+    type: Progressing
+  - lastTransitionTime: "2026-05-12T00:56:25Z"
+    lastUpdateTime: "2026-05-12T00:56:25Z"
+    message: Deployment has minimum availability.
+    reason: MinimumReplicasAvailable
+    type: Available
+  observedGeneration: 15

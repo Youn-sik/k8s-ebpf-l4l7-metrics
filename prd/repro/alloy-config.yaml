@@ -1,0 +1,44 @@
+apiVersion: v1
+data:
+  config.alloy: |
+    // Kubernetes 로그 수집
+    loki.source.kubernetes "pods" {
+      targets    = discovery.kubernetes.pods.targets
+      forward_to = [loki.process.default.receiver]
+    }
+
+    discovery.kubernetes "pods" {
+      role = "pod"
+      namespaces {
+        names = ["ebpf-repro", "skuber-system", "kube-system"]
+      }
+    }
+
+    loki.process "default" {
+      forward_to = [loki.write.local.receiver]
+
+      stage.labels {
+        values = {
+          namespace = "",
+          pod       = "",
+        }
+      }
+    }
+
+    // Loki로 전송 (gzip 압축 protobuf — 고객 환경 동일)
+    loki.write "local" {
+      endpoint {
+        url = "http://loki.ebpf-repro.svc:3100/loki/api/v1/push"
+        // 멀티테넌시 헤더 주입 — 헤더 크기 증가
+        headers = {
+          "X-Scope-OrgID" = "tenant-megazone-poc-repro",
+        }
+      }
+    }
+kind: ConfigMap
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"v1","data":{"config.alloy":"// Kubernetes 로그 수집\nloki.source.kubernetes \"pods\" {\n  targets    = discovery.kubernetes.pods.targets\n  forward_to = [loki.process.default.receiver]\n}\n\ndiscovery.kubernetes \"pods\" {\n  role = \"pod\"\n  namespaces {\n    names = [\"ebpf-repro\", \"skuber-system\", \"kube-system\"]\n  }\n}\n\nloki.process \"default\" {\n  forward_to = [loki.write.local.receiver]\n\n  stage.labels {\n    values = {\n      namespace = \"\",\n      pod       = \"\",\n    }\n  }\n}\n\n// Loki로 전송 (gzip 압축 protobuf — 고객 환경 동일)\nloki.write \"local\" {\n  endpoint {\n    url = \"http://loki.ebpf-repro.svc:3100/loki/api/v1/push\"\n    // 멀티테넌시 헤더 주입 — 헤더 크기 증가\n    headers = {\n      \"X-Scope-OrgID\" = \"tenant-megazone-poc-repro\",\n    }\n  }\n}\n"},"kind":"ConfigMap","metadata":{"annotations":{},"name":"alloy-config","namespace":"ebpf-repro"}}
+  name: alloy-config
+  namespace: ebpf-repro

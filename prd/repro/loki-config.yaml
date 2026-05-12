@@ -1,0 +1,33 @@
+apiVersion: v1
+data:
+  loki.yaml: |
+    auth_enabled: false
+    server:
+      http_listen_port: 3100
+    common:
+      ring:
+        kvstore:
+          store: inmemory
+        replication_factor: 1
+      path_prefix: /loki
+    schema_config:
+      configs:
+        - from: "2024-01-01"
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+    storage_config:
+      filesystem:
+        directory: /loki/chunks
+    limits_config:
+      reject_old_samples: false
+kind: ConfigMap
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"v1","data":{"loki.yaml":"auth_enabled: false\nserver:\n  http_listen_port: 3100\ncommon:\n  ring:\n    kvstore:\n      store: inmemory\n    replication_factor: 1\n  path_prefix: /loki\nschema_config:\n  configs:\n    - from: \"2024-01-01\"\n      store: tsdb\n      object_store: filesystem\n      schema: v13\n      index:\n        prefix: index_\n        period: 24h\nstorage_config:\n  filesystem:\n    directory: /loki/chunks\nlimits_config:\n  reject_old_samples: false\n"},"kind":"ConfigMap","metadata":{"annotations":{},"name":"loki-config","namespace":"ebpf-repro"}}
+  name: loki-config
+  namespace: ebpf-repro

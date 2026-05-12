@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    deployment.kubernetes.io/revision: "1"
+      {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{},"name":"dummy-client","namespace":"ebpf-repro"},"spec":{"replicas":20,"selector":{"matchLabels":{"app":"dummy-client"}},"template":{"metadata":{"labels":{"app":"dummy-client"}},"spec":{"containers":[{"command":["/bin/sh","-c","while true; do\n  curl -s -o /dev/null \\\n    -H \"Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJkdW1teS1jbGllbnQiLCJleHAiOjE5OTk5OTk5OTl9.fake-jwt-padding-for-header-size\" \\\n    -H \"X-Scope-OrgID: tenant-megazone-poc-repro\" \\\n    -H \"traceparent: 00-$(cat /dev/urandom | tr -dc 'a-f0-9' | head -c 32)-$(cat /dev/urandom | tr -dc 'a-f0-9' | head -c 16)-01\" \\\n    -H \"tracestate: congo=t61rcWkgMzE\" \\\n    -H \"X-Request-ID: req-$RANDOM\" \\\n    -A \"TELB-HealthChecker/2.0\" \\\n    http://dummy-web.ebpf-repro.svc/\n  sleep 0.1\ndone\n"],"image":"curlimages/curl:8.11.0","name":"client","resources":{"limits":{"memory":"32Mi"},"requests":{"cpu":"10m","memory":"16Mi"}}}],"nodeSelector":{"eks.amazonaws.com/nodegroup":"ebpf-repro-ng"}}}}}
+  name: dummy-client
+  namespace: ebpf-repro
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 20
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: dummy-client
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: dummy-client
+    spec:
+      containers:
+      - command:
+        - /bin/sh
+        - -c
+        - |
+          while true; do
+            curl -s -o /dev/null \
+              -H "Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJkdW1teS1jbGllbnQiLCJleHAiOjE5OTk5OTk5OTl9.fake-jwt-padding-for-header-size" \
+              -H "X-Scope-OrgID: tenant-megazone-poc-repro" \
+              -H "traceparent: 00-$(cat /dev/urandom | tr -dc 'a-f0-9' | head -c 32)-$(cat /dev/urandom | tr -dc 'a-f0-9' | head -c 16)-01" \
+              -H "tracestate: congo=t61rcWkgMzE" \
+              -H "X-Request-ID: req-$RANDOM" \
+              -A "TELB-HealthChecker/2.0" \
+              http://dummy-web.ebpf-repro.svc/
+            sleep 0.1
+          done
+        image: curlimages/curl:8.11.0
+        imagePullPolicy: IfNotPresent
+        name: client
+        resources:
+          limits:
+            memory: 32Mi
+          requests:
+            cpu: 10m
+            memory: 16Mi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+      dnsPolicy: ClusterFirst
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: ebpf-repro-ng
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
+  availableReplicas: 20
+  conditions:
+  - lastTransitionTime: "2026-05-11T06:08:05Z"
+    lastUpdateTime: "2026-05-11T06:08:10Z"
+    message: ReplicaSet "dummy-client-6db8db6b48" has successfully progressed.
+    reason: NewReplicaSetAvailable
+    type: Progressing
+  - lastTransitionTime: "2026-05-12T00:06:16Z"
+    lastUpdateTime: "2026-05-12T00:06:16Z"
+    message: Deployment has minimum availability.
+    reason: MinimumReplicasAvailable
+    type: Available
+  observedGeneration: 1
+  readyReplicas: 20
+  replicas: 20
+  updatedReplicas: 20
