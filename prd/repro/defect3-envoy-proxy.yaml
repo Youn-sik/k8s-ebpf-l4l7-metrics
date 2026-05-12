@@ -1,0 +1,112 @@
+# 결함 ③ 재현: Envoy 리버스 프록시로 UA 헤더에 바이너리 주입
+# curl → Envoy(:10000) → Loki(:3100)
+# Envoy Lua filter가 UA를 30B ASCII + 바이너리로 변조
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: envoy-ua-inject
+  namespace: ebpf-repro
+data:
+  envoy.yaml: |
+    static_resources:
+      listeners:
+      - name: listener_0
+        address:
+          socket_address:
+            address: 0.0.0.0
+            port_value: 10000
+        filter_chains:
+        - filters:
+          - name: envoy.filters.network.http_connection_manager
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+              stat_prefix: ingress_http
+              route_config:
+                name: local_route
+                virtual_hosts:
+                - name: backend
+                  domains: ["*"]
+                  routes:
+                  - match:
+                      prefix: "/"
+                    route:
+                      cluster: loki_cluster
+              http_filters:
+              - name: envoy.filters.http.lua
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+                  inline_code: |
+                    function envoy_on_request(request_handle)
+                      -- 30B ASCII + 바이너리 (고객 6875r 패턴 재현)
+                      -- \xfe\xdb\x01\x80\x81\x82\x83\x84\x85 = 9B binary
+                      -- 총 39B > 31 → [:31] truncation 시 바이너리 포함
+                      local binary_ua = "TELB-HealthChecker/2.0-mgzn-po" ..
+                        "\xfe\xdb\x01\x80\x81\x82\x83\x84\x85\x86\x87\x88"
+                      request_handle:headers():replace("user-agent", binary_ua)
+                    end
+              - name: envoy.filters.http.router
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+      clusters:
+      - name: loki_cluster
+        connect_timeout: 5s
+        type: LOGICAL_DNS
+        lb_policy: ROUND_ROBIN
+        load_assignment:
+          cluster_name: loki_cluster
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address:
+                    address: loki.ebpf-repro.svc
+                    port_value: 3100
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: envoy-ua-proxy
+  namespace: ebpf-repro
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: envoy-ua-proxy
+  template:
+    metadata:
+      labels:
+        app: envoy-ua-proxy
+    spec:
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: ebpf-repro-ng
+      containers:
+      - name: envoy
+        image: envoyproxy/envoy:v1.32-latest
+        ports:
+        - containerPort: 10000
+        volumeMounts:
+        - name: config
+          mountPath: /etc/envoy
+        command: ["envoy", "-c", "/etc/envoy/envoy.yaml", "--log-level", "warn"]
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            memory: 128Mi
+      volumes:
+      - name: config
+        configMap:
+          name: envoy-ua-inject
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: envoy-ua-proxy
+  namespace: ebpf-repro
+spec:
+  selector:
+    app: envoy-ua-proxy
+  ports:
+  - port: 10000
+    targetPort: 10000
